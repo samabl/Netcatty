@@ -1,4 +1,5 @@
 import type { ToolCall, ToolResult, AIPermissionMode, WebSearchConfig } from '../types';
+import type { ExternalMcpClientBridge } from '../mcp/externalMcpTypes';
 import type {
   TerminalContextReader,
 } from '../../../domain/terminalContextRead';
@@ -17,7 +18,7 @@ import { fitTerminalExecuteResultForModel } from '../harness/terminalCompression
  * Bridge interface for Catty Agent to interact with the Electron main process.
  * This mirrors the AI-related subset of window.netcatty from electron/preload.cjs.
  */
-export interface NetcattyBridge {
+export interface NetcattyBridge extends ExternalMcpClientBridge {
   aiExec(
     sessionId: string,
     command: string,

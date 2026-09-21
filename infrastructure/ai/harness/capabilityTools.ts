@@ -32,6 +32,8 @@ import {
   type ToolResultDedup,
 } from './toolResultDedup';
 import cattyToolSpecs from './generated/cattyToolSpecs.json';
+import type { ExternalMcpToolDescriptor } from '../mcp/externalMcpTypes';
+import { buildExternalMcpTools, mergeCattyToolBundles } from './externalMcpTools';
 import {
   cattyToolContextSchema,
   toolDepsFromContext,
@@ -57,9 +59,22 @@ type CattyToolSpec = {
   };
 };
 
+/**
+ * Approval policy for one tool. Catalog tools resolve this from the generated
+ * spec; tools from external MCP servers carry their own entry.
+ */
+export type CattyToolPolicy = {
+  write: boolean;
+  bypassesApproval: boolean;
+  bypassesObserverBlock?: boolean;
+  capabilityId?: string;
+};
+
 export type CattyToolsBundle = {
   tools: Record<string, ReturnType<typeof tool>>;
   toolsContext: Record<string, CattyToolContext>;
+  /** Tool name -> policy for tools that are not in the generated catalog. */
+  policies?: Record<string, CattyToolPolicy>;
 };
 
 function buildZodObject(shape: Record<string, FieldShape>): z.ZodObject<Record<string, z.ZodTypeAny>> {
@@ -759,6 +774,41 @@ export function createCattyToolsFromCatalog(
   }
 
   return { tools: catalogTools, toolsContext };
+}
+
+/**
+ * Create the full Catty tool bundle: catalog tools plus every tool published by
+ * a connected external MCP server. External tools reuse the catalog's per-tool
+ * context and carry their own approval policy.
+ */
+export function createCattyToolsBundle(
+  bridge: NetcattyBridge,
+  context: ToolDeps['context'],
+  commandBlocklist?: string[],
+  permissionMode: AIPermissionMode = 'confirm',
+  webSearchConfig?: WebSearchConfig,
+  chatSessionId?: string,
+  toolOutputStore?: ToolOutputStore,
+  toolResultDedup?: ToolResultDedup,
+  externalTools?: readonly ExternalMcpToolDescriptor[],
+): CattyToolsBundle {
+  const catalogBundle = createCattyToolsFromCatalog(
+    bridge,
+    context,
+    commandBlocklist,
+    permissionMode,
+    webSearchConfig,
+    chatSessionId,
+    toolOutputStore,
+    toolResultDedup,
+  );
+  if (!externalTools?.length) return catalogBundle;
+  const sharedContext = Object.values(catalogBundle.toolsContext)[0];
+  if (!sharedContext) return catalogBundle;
+  return mergeCattyToolBundles(
+    catalogBundle,
+    buildExternalMcpTools(externalTools, sharedContext),
+  );
 }
 
 /** Test helper: attach shared context when calling tool.execute directly. */

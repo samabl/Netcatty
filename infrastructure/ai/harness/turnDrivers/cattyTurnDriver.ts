@@ -22,7 +22,9 @@ import {
   resolveEffectiveCattyReasoningEffort,
 } from '../../cattyReasoning';
 import { createModelFromConfig } from '../../sdk/providers';
-import { createCattyToolsFromCatalog } from '../capabilityTools';
+import { createCattyToolsBundle } from '../capabilityTools';
+import { fetchExternalMcpTools } from '../../mcp/externalMcpBridge';
+import { summarizeExternalMcpServers } from '../externalMcpTools';
 import { createInitialCattyRuntimeContext } from '../cattyRuntimeContext';
 import { prepareStepContext, extractLatestUserGoal } from '../contextManager';
 import {
@@ -158,7 +160,10 @@ async function runCattyTurn(input: CattyTurnInput, ctx: TurnDriverContext): Prom
     workspaceId: context.scopeType === 'workspace' ? context.scopeTargetId : undefined,
     workspaceName: context.scopeType === 'workspace' ? context.scopeLabel : undefined,
   }));
-  const toolsBundle = createCattyToolsFromCatalog(
+  // External MCP tools are optional: an unreachable third-party server must
+  // degrade to "no extra tools", never fail the turn.
+  const externalMcpTools = await fetchExternalMcpTools(netcattyBridge);
+  const toolsBundle = createCattyToolsBundle(
     netcattyBridge,
     getExecutorContext,
     context.commandBlocklist,
@@ -167,6 +172,7 @@ async function runCattyTurn(input: CattyTurnInput, ctx: TurnDriverContext): Prom
     sessionId,
     ctx.toolOutputStore,
     ctx.toolResultDedup,
+    externalMcpTools,
   );
   const { tools } = toolsBundle;
 
@@ -177,6 +183,7 @@ async function runCattyTurn(input: CattyTurnInput, ctx: TurnDriverContext): Prom
     permissionMode: context.globalPermissionMode,
     webSearchEnabled: isWebSearchReady(context.webSearchConfig),
     userSkillsContext,
+    externalMcpServers: summarizeExternalMcpServers(externalMcpTools),
   });
 
   if (!context.activeProvider) {

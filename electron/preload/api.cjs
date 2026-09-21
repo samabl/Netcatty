@@ -1838,6 +1838,19 @@ function createPreloadApi(ctx) {
   externalMcpGrokAdd: async () => {
     return ipcRenderer.invoke("netcatty:external-mcp:grok:add");
   },
+  // External MCP client (Netcatty calling user-configured third-party servers)
+  mcpClientSetServers: async (servers) => {
+    return ipcRenderer.invoke("netcatty:ai:mcp-client:set-servers", { servers });
+  },
+  mcpClientGetStatus: async () => {
+    return ipcRenderer.invoke("netcatty:ai:mcp-client:status");
+  },
+  mcpClientListTools: async () => {
+    return ipcRenderer.invoke("netcatty:ai:mcp-client:list-tools");
+  },
+  mcpClientCallTool: async (serverId, toolName, args, timeoutMs) => {
+    return ipcRenderer.invoke("netcatty:ai:mcp-client:call-tool", { serverId, toolName, args, timeoutMs });
+  },
   // MCP Server session metadata
   aiMcpUpdateSessions: async (sessions, chatSessionId) => {
     return ipcRenderer.invoke("netcatty:ai:mcp:update-sessions", { sessions, chatSessionId });

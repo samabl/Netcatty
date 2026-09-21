@@ -1,4 +1,27 @@
 import type { CodebuddyAdvancedOptions } from '../../infrastructure/ai/types';
+import type { ExternalMcpServer } from '../../domain/mcp/externalMcpServer';
+
+/** Aggregated status of one user-configured external MCP server. */
+export interface NetcattyExternalMcpServerStatus {
+  id: string;
+  name: string;
+  transport: 'stdio' | 'http' | 'sse';
+  enabled: boolean;
+  state: 'disabled' | 'connecting' | 'connected' | 'error';
+  toolCount: number;
+  error: string | null;
+}
+
+/** One tool published by a user-configured external MCP server. */
+export interface NetcattyExternalMcpToolDescriptor {
+  serverId: string;
+  serverName: string;
+  toolName: string;
+  description: string;
+  inputSchema: Record<string, unknown>;
+  readOnlyHint?: boolean;
+  autoApprove?: boolean;
+}
 
 declare global {
   interface NetcattyBridge {
@@ -242,6 +265,33 @@ declare global {
     externalMcpClaudeAdd?(): Promise<Record<string, unknown>>;
     externalMcpGrokGetStatus?(): Promise<Record<string, unknown>>;
     externalMcpGrokAdd?(): Promise<Record<string, unknown>>;
+    // External MCP client: Netcatty calling user-configured third-party servers.
+    mcpClientSetServers?(servers: ExternalMcpServer[]): Promise<{
+      ok: boolean;
+      status?: NetcattyExternalMcpServerStatus[];
+      error?: string;
+    }>;
+    mcpClientGetStatus?(): Promise<{
+      ok: boolean;
+      status?: NetcattyExternalMcpServerStatus[];
+      error?: string;
+    }>;
+    mcpClientListTools?(): Promise<{
+      ok: boolean;
+      tools?: NetcattyExternalMcpToolDescriptor[];
+      error?: string;
+    }>;
+    mcpClientCallTool?(
+      serverId: string,
+      toolName: string,
+      args?: Record<string, unknown>,
+      timeoutMs?: number,
+    ): Promise<{
+      ok?: boolean;
+      result?: string;
+      structuredContent?: unknown;
+      error?: string;
+    }>;
     aiSdkAgentCancel?(requestId: string, chatSessionId?: string): Promise<{ ok: boolean; error?: string }>;
     aiSdkAgentCleanup?(chatSessionId: string): Promise<{ ok: boolean }>;
     aiSdkAgentElicitationResponse?(elicitationId: string, action: string, content?: Record<string, unknown>): Promise<{ ok: boolean; error?: string }>;

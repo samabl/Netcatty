@@ -197,6 +197,8 @@ export const STORAGE_KEY_AI_MAX_ITERATIONS = 'netcatty_ai_max_iterations_v1';
 export const STORAGE_KEY_AI_SESSIONS = 'netcatty_ai_sessions_v1';
 export const STORAGE_KEY_AI_ACTIVE_SESSION_MAP = 'netcatty_ai_active_session_map_v1';
 export const STORAGE_KEY_AI_AGENT_MODEL_MAP = 'netcatty_ai_agent_model_map_v1';
+/** Third-party MCP servers the in-app agent may call (Netcatty as MCP client). */
+export const STORAGE_KEY_AI_EXTERNAL_MCP_SERVERS = 'netcatty_ai_external_mcp_servers_v1';
 export const STORAGE_KEY_AI_AGENT_PROVIDER_MAP = 'netcatty_ai_agent_provider_map_v1';
 export const STORAGE_KEY_AI_AGENT_THINKING_MAP = 'netcatty_ai_agent_thinking_map_v1';
 export const STORAGE_KEY_AI_COMPOSER_MODEL_PREFS = 'netcatty_ai_composer_model_prefs_v1';

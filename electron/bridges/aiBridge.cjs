@@ -26,6 +26,8 @@ const {
   toPublicUserSkillsStatus,
 } = require("./ai/userSkills.cjs");
 const { registerProviderHandlers } = require("./aiBridge/providerHandlers.cjs"), { registerCattyExecHandlers } = require("./aiBridge/cattyExecHandlers.cjs"), { createAgentCliHelpers } = require("./aiBridge/agentCliHelpers.cjs");
+const { createMcpClientManager } = require("./aiBridge/mcpClientManager.cjs");
+const { registerExternalMcpClientHandlers } = require("./aiBridge/mcpExternalHandlers.cjs");
 const { createVaultAgentBridge } = require("./aiBridge/vaultAgentBridge.cjs");
 const { registerAgentDiscoveryHandlers } = require("./aiBridge/agentDiscoveryHandlers.cjs"), { registerAgentProcessHandlers } = require("./aiBridge/agentProcessHandlers.cjs"), { registerSdkStreamHandlers } = require("./aiBridge/sdk/sdkStreamHandlers.cjs");
 const { probeClaudeAuth, probeCopilotAuth, probeCodexAuth, probeCodebuddyAuth, probeCursorCliAuth, probeGrokAuth } = require("./aiBridge/agentAuthProbes.cjs");
@@ -227,6 +229,8 @@ function buildExternalAgentContextualPrompt({ mode, prompt, chatSessionId, defau
 const { execViaPty } = require("./ai/ptyExec.cjs");
 
 let externalMcpController = null;
+/** External MCP client: Netcatty calling user-configured third-party servers. */
+let mcpClientManager = null;
 let userDataDir = null;
 let sessions = null;
 let sftpClients = null;
@@ -942,6 +946,7 @@ function createHandlerContext(ipcMain) {
     get cliDiscoveryFilePath() { return cliDiscoveryFilePath; },
     set cliDiscoveryFilePath(value) { cliDiscoveryFilePath = value; },
     activeStreams,
+    get mcpClientManager() { return mcpClientManager; },
     get providerConfigs() { return providerConfigs; },
     set providerConfigs(value) { providerConfigs = value; },
     get webSearchApiHost() { return webSearchApiHost; },
@@ -970,6 +975,12 @@ function createHandlerContext(ipcMain) {
 }
 
 function registerHandlers(ipcMain) {
+  if (!mcpClientManager) {
+    mcpClientManager = createMcpClientManager({
+      // Server configs arrive with `enc:v1:` secrets; unwrap them only here.
+      decryptSecret: decryptApiKeyValue,
+    });
+  }
   const context = createHandlerContext(ipcMain);
   Object.assign(context, createAgentCliHelpers(context));
   registeredContext = context;
@@ -996,6 +1007,7 @@ function registerHandlers(ipcMain) {
   registerAgentDiscoveryHandlers(context);
   registerAgentProcessHandlers(context);
   registerSdkStreamHandlers(context);
+  registerExternalMcpClientHandlers(context);
 
   if (externalMcpController) {
     externalMcpController.registerHandlers(ipcMain, validateSenderOrSettings);
@@ -1034,6 +1046,12 @@ function cleanup() {
     externalMcpController?.cleanup?.();
   } catch {
     // Ignore external MCP cleanup failures during shutdown.
+  }
+  try {
+    void mcpClientManager?.dispose?.();
+    mcpClientManager = null;
+  } catch {
+    // Ignore external MCP client teardown failures during shutdown.
   }
   if (typeof mcpServerBridge.setExternalMcpHooks === "function") {
     mcpServerBridge.setExternalMcpHooks(null);

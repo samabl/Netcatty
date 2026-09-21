@@ -3,49 +3,50 @@ import type { AIPermissionMode } from '../types';
 import { requestApproval as defaultRequestApproval } from '../shared/approvalGate';
 import { resolveCapabilityId } from './permissionGrants';
 import cattyToolSpecs from './generated/cattyToolSpecs.json';
+import type { CattyToolPolicy } from './capabilityTools';
 
 type CattyToolPolicySpec = {
   toolName: string;
   capabilityId: string;
-  policy: {
-    write: boolean;
-    bypassesApproval: boolean;
-    bypassesObserverBlock?: boolean;
-  };
+  policy: CattyToolPolicy;
 };
 
 const policyByToolName = new Map<string, CattyToolPolicySpec>(
   (cattyToolSpecs as CattyToolPolicySpec[]).map((spec) => [spec.toolName, spec]),
 );
 
-function needsUserApproval(
+/**
+ * Resolve the approval policy for a tool. An explicit override (tools from
+ * external MCP servers, which are not in the generated catalog) wins over the
+ * catalog spec so a same-named third-party tool can never self-approve.
+ */
+export function resolveCattyToolPolicy(
   toolName: string,
-  permissionMode: AIPermissionMode,
-): boolean {
-  if (permissionMode !== 'confirm') return false;
-  const spec = policyByToolName.get(toolName);
-  if (!spec) return false;
-  return spec.policy.write && !spec.policy.bypassesApproval;
+  policies?: Record<string, CattyToolPolicy>,
+): CattyToolPolicy | undefined {
+  return policies?.[toolName] ?? policyByToolName.get(toolName)?.policy;
 }
 
 export function buildCattyToolApproval(input: {
   permissionMode: AIPermissionMode;
   chatSessionId?: string;
   requestApproval?: typeof defaultRequestApproval;
+  /** Per-turn policy overrides, keyed by tool name. */
+  policies?: Record<string, CattyToolPolicy>;
 }): ToolApprovalConfiguration<Record<string, never>, import('./cattyRuntimeContext').CattyRuntimeContext> {
-  const { permissionMode, chatSessionId, requestApproval = defaultRequestApproval } = input;
+  const { permissionMode, chatSessionId, requestApproval = defaultRequestApproval, policies } = input;
 
   return async ({ toolCall }) => {
-    const spec = policyByToolName.get(toolCall.toolName);
-    if (!spec?.policy.write) {
+    const policy = resolveCattyToolPolicy(toolCall.toolName, policies);
+    if (!policy?.write) {
       return undefined;
     }
 
-    if (permissionMode === 'observer' && !spec.policy.bypassesObserverBlock) {
+    if (permissionMode === 'observer' && !policy.bypassesObserverBlock) {
       return { type: 'denied' as const, reason: 'Observer mode blocks write operations.' };
     }
 
-    if (!needsUserApproval(toolCall.toolName, permissionMode)) {
+    if (permissionMode !== 'confirm' || policy.bypassesApproval) {
       return undefined;
     }
 
@@ -56,7 +57,7 @@ export function buildCattyToolApproval(input: {
       args,
       chatSessionId,
       undefined,
-      spec.capabilityId ?? resolveCapabilityId(toolCall.toolName),
+      policy.capabilityId ?? resolveCapabilityId(toolCall.toolName),
     );
 
     if (approved) {

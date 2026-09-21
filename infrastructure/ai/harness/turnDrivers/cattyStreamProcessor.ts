@@ -140,6 +140,9 @@ export async function processCattyStream(input: ProcessCattyStreamInput): Promis
     toolApproval: buildCattyToolApproval({
       permissionMode: runtimeContext.permissionMode,
       chatSessionId: runtimeContext.chatSessionId,
+      // External MCP tools carry their own policy; catalog tools fall back to
+      // the generated specs.
+      policies: toolsBundle.policies,
     }),
     stopWhen: isStepCount(maxIterations),
     abortSignal: signal,

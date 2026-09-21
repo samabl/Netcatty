@@ -21,6 +21,7 @@ import { getNotesSnapshot } from '../state/notesStore';
 import { useVaultAgentBridge } from '../state/useVaultAgentBridge';
 import { useWindowControls } from '../state/useWindowControls';
 import { useTerminalKeyboardFocus } from '../state/useTerminalKeyboardFocus';
+import { useExternalMcpServersState } from '../state/useExternalMcpServersState';
 import { editorTabStore, useEditorTabChromeList } from '../state/editorTabStore';
 import { findEditorSftpOwnerTabId } from '../state/editorSftpOwnerRegistry';
 import {
@@ -152,6 +153,11 @@ export function AppSideEffects() {
   useTerminalKeyboardFocus();
 
   const discoveredShells = useDiscoveredShells();
+
+  // Keep the main process aligned with the user's external MCP servers so a
+  // Catty turn can list their tools. The Settings page mounts the same hook
+  // for CRUD; the localStorage adapter change event fans edits out to both.
+  useExternalMcpServersState();
 
   // Sync workspace focus indicator style to DOM for CSS targeting
   useEffect(() => {
