@@ -1,6 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 import {
+  applyExternalMcpImport,
+  type ExternalMcpImportAction,
+} from '../../domain/mcp/externalMcpImport';
+import {
   createExternalMcpServerId,
   sanitizeExternalMcpServers,
   type ExternalMcpKeyValue,
@@ -97,6 +101,11 @@ export interface ExternalMcpServersState {
   /** False when running outside Electron (no MCP client bridge on window). */
   isBridgeAvailable: boolean;
   addServer: (server: ExternalMcpServer) => void;
+  /**
+   * Apply a JSON import plan in one write: same-name entries replace the
+   * existing server in place, new names are appended.
+   */
+  applyImport: (actions: ExternalMcpImportAction[]) => void;
   updateServer: (server: ExternalMcpServer) => void;
   removeServer: (id: string) => void;
   setServerEnabled: (id: string, enabled: boolean) => void;
@@ -184,6 +193,11 @@ export function useExternalMcpServersState(options: { syncToMain?: boolean } = {
     commit([...serversRef.current, server]);
   }, [commit]);
 
+  const applyImport = useCallback((actions: ExternalMcpImportAction[]) => {
+    if (actions.length === 0) return;
+    commit(applyExternalMcpImport(serversRef.current, actions));
+  }, [commit]);
+
   const updateServer = useCallback((server: ExternalMcpServer) => {
     commit(serversRef.current.map((candidate) => (
       candidate.id === server.id ? { ...server, updatedAt: Date.now() } : candidate
@@ -219,6 +233,7 @@ export function useExternalMcpServersState(options: { syncToMain?: boolean } = {
     isLoading,
     isBridgeAvailable: getExternalMcpClientBridge(netcattyBridge.get()) !== null,
     addServer,
+    applyImport,
     updateServer,
     removeServer,
     setServerEnabled,

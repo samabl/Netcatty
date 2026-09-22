@@ -1,5 +1,5 @@
 import React, { useCallback, useMemo, useState } from 'react';
-import { Plus, RefreshCcw, Trash2 } from 'lucide-react';
+import { FileJson, Plus, RefreshCcw, Trash2 } from 'lucide-react';
 
 import { useI18n } from '../../../../application/i18n/I18nProvider';
 import {
@@ -17,6 +17,7 @@ import { ConfirmDialog } from '../../../ui/confirm-dialog';
 import { Input } from '../../../ui/input';
 import { Textarea } from '../../../ui/textarea';
 import { Select, SettingCard, SettingHint, SettingRow, Toggle } from '../../settings-ui';
+import { ExternalMcpImportDialog } from './ExternalMcpImportDialog';
 import {
   EXTERNAL_MCP_VALIDATION_MESSAGE_KEY,
   createEmptyFormValues,
@@ -60,6 +61,7 @@ export const ExternalMcpServersCard: React.FC = () => {
     isLoading,
     isBridgeAvailable,
     addServer,
+    applyImport,
     updateServer,
     removeServer,
     setServerEnabled,
@@ -70,6 +72,7 @@ export const ExternalMcpServersCard: React.FC = () => {
   const [isNew, setIsNew] = useState(false);
   const [errors, setErrors] = useState<string[]>([]);
   const [pendingDelete, setPendingDelete] = useState<ExternalMcpServer | null>(null);
+  const [importOpen, setImportOpen] = useState(false);
 
   const statusById = useMemo(() => {
     const map = new Map<string, (typeof statuses)[number]>();
@@ -124,6 +127,10 @@ export const ExternalMcpServersCard: React.FC = () => {
           {t('ai.mcpServers.description')}
         </div>
         <div className="flex shrink-0 items-center gap-2">
+          <Button variant="outline" size="sm" onClick={() => setImportOpen(true)}>
+            <FileJson size={14} className="mr-1.5" />
+            {t('ai.mcpServers.import')}
+          </Button>
           <Button variant="outline" size="sm" onClick={() => void refreshStatuses()} disabled={isLoading}>
             <RefreshCcw size={14} />
           </Button>
@@ -298,6 +305,13 @@ export const ExternalMcpServersCard: React.FC = () => {
       {!isBridgeAvailable ? (
         <SettingHint>{t('ai.mcpServers.bridgeUnavailable')}</SettingHint>
       ) : null}
+
+      <ExternalMcpImportDialog
+        open={importOpen}
+        onOpenChange={setImportOpen}
+        existingServers={servers}
+        onImport={applyImport}
+      />
 
       <ConfirmDialog
         open={pendingDelete !== null}
