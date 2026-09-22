@@ -71,14 +71,19 @@ jobs:
       # The et resolver defaults its release owner to GITHUB_REPOSITORY's owner,
       # which on a fork resolves to a nonexistent `<fork>/Netcatty-et-bin` and
       # soft-skips with only a warning. Pin the upstream binary repos instead.
+      # --resolve-release queries the GitHub API, and runners share an IP whose
+      # unauthenticated quota (60 req/h) is easily exhausted. Both resolvers
+      # read GITHUB_TOKEN/GH_TOKEN, so authenticate the lookups.
       - name: Fetch bundled mosh-client
         env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           MOSH_BIN_OWNER: binaricat
           MOSH_BIN_REPO: MoshCatty
         run: npm run fetch:mosh:dev
 
       - name: Fetch bundled et-client
         env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ET_BIN_OWNER: binaricat
           ET_BIN_REPO: Netcatty-et-bin
         run: npm run fetch:et:dev
