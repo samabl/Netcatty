@@ -1,20 +1,22 @@
 name: windows-release
 
-# Windows-only pipeline for this fork: a push to `main` (or a `v*` tag) builds
-# the Windows x64 packages and publishes them as a GitHub Release. Manual runs
-# can inject a version and opt out of publishing.
+# Windows-only pipeline for this fork: pushing the `win-release` branch (or a
+# manual run) builds the Windows x64 packages and publishes them as a GitHub
+# Release.
 #
-# Deliberately separate from the upstream `build.yml`: that workflow runs a
-# three-platform matrix and gates publishing behind upstream release secrets,
-# which a fork does not inherit.
+# The trigger is a dedicated branch rather than `main` on purpose:
+#   - upstream `build.yml` and `test.yml` both watch `main`, so `main` stays
+#     reserved for syncing upstream and spawning only the workflows upstream
+#     defines;
+#   - a main push would otherwise mint a release on every upstream sync.
+#
+# Deliberately separate from upstream `build.yml`, which runs a three-platform
+# matrix and gates publishing behind release secrets a fork does not inherit.
 
 on:
   push:
     branches:
-      - main
-    tags:
-      - "v[0-9]+.[0-9]+.[0-9]+"
-      - "v[0-9]+.[0-9]+.[0-9]+-[0-9A-Za-z]*"
+      - win-release
   workflow_dispatch:
     inputs:
       version:
@@ -127,17 +129,59 @@ jobs:
           echo "Setting version to ${version}"
           npm pkg set version="${version}"
 
-      - name: Build Windows packages
+      - name: Build renderer
         env:
-          # No signing certificate on a fork: make that explicit instead of
-          # letting electron-builder probe for an identity.
-          CSC_IDENTITY_AUTO_DISCOVERY: "false"
-          ELECTRON_BUILDER_PUBLISH: "never"
           VITE_SYNC_GITHUB_CLIENT_ID: ${{ secrets.VITE_SYNC_GITHUB_CLIENT_ID }}
           VITE_SYNC_GOOGLE_CLIENT_ID: ${{ secrets.VITE_SYNC_GOOGLE_CLIENT_ID }}
           VITE_SYNC_GOOGLE_CLIENT_SECRET: ${{ secrets.VITE_SYNC_GOOGLE_CLIENT_SECRET }}
           VITE_SYNC_ONEDRIVE_CLIENT_ID: ${{ secrets.VITE_SYNC_ONEDRIVE_CLIENT_ID }}
-        run: npm run pack:win-x64
+        run: npm run build
+
+      # --config points at the fork-only wrapper, which is the upstream config
+      # plus Azure Trusted Signing options when those secrets exist. PFX
+      # signing needs no config at all: electron-builder reads WIN_CSC_LINK and
+      # WIN_CSC_KEY_PASSWORD from the environment.
+      - name: Package Windows
+        env:
+          npm_config_arch: x64
+          ELECTRON_BUILDER_PUBLISH: "never"
+          WIN_CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
+          WIN_CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          AZURE_TRUSTED_SIGNING_ENDPOINT: ${{ secrets.AZURE_TRUSTED_SIGNING_ENDPOINT }}
+          AZURE_TRUSTED_SIGNING_ACCOUNT_NAME: ${{ secrets.AZURE_TRUSTED_SIGNING_ACCOUNT_NAME }}
+          AZURE_TRUSTED_SIGNING_CERTIFICATE_PROFILE_NAME: ${{ secrets.AZURE_TRUSTED_SIGNING_CERTIFICATE_PROFILE_NAME }}
+          AZURE_TRUSTED_SIGNING_PUBLISHER_NAME: ${{ secrets.AZURE_TRUSTED_SIGNING_PUBLISHER_NAME }}
+        run: npx --no-install electron-builder --config electron-builder.windows-release.cjs --win --x64 --publish=never
+
+      # The `secrets` context is not available in step `if` expressions, so the
+      # gate is computed into an env var instead. Without signing secrets this
+      # step is a no-op and the build stays unsigned (as before).
+      - name: Verify code signatures when signing is configured
+        shell: pwsh
+        env:
+          SIGNING_CONFIGURED: ${{ secrets.WIN_CSC_LINK != '' || secrets.AZURE_TRUSTED_SIGNING_PUBLISHER_NAME != '' }}
+        run: |
+          if ($env:SIGNING_CONFIGURED -ne 'true') {
+            Write-Output 'Signing secrets are absent - skipping signature verification.'
+            exit 0
+          }
+          $exes = @(Get-ChildItem -Path release -Filter '*.exe' -File)
+          if ($exes.Count -eq 0) { Write-Error 'No .exe artifacts found to verify.'; exit 1 }
+          $unsigned = @()
+          foreach ($exe in $exes) {
+            $sig = Get-AuthenticodeSignature -FilePath $exe.FullName
+            $subject = if ($sig.SignerCertificate) { $sig.SignerCertificate.Subject } else { '<none>' }
+            Write-Output ("{0}: {1} | {2}" -f $exe.Name, $sig.Status, $subject)
+            if ($sig.Status -ne 'Valid') { $unsigned += $exe.Name }
+          }
+          if ($unsigned.Count -gt 0) {
+            Write-Error ("Signature missing or invalid for: " + ($unsigned -join ', '))
+            exit 1
+          }
+          Write-Output 'All release executables carry a valid signature.'
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v7
