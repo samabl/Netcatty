@@ -154,7 +154,7 @@ jobs:
           AZURE_TRUSTED_SIGNING_ACCOUNT_NAME: ${{ secrets.AZURE_TRUSTED_SIGNING_ACCOUNT_NAME }}
           AZURE_TRUSTED_SIGNING_CERTIFICATE_PROFILE_NAME: ${{ secrets.AZURE_TRUSTED_SIGNING_CERTIFICATE_PROFILE_NAME }}
           AZURE_TRUSTED_SIGNING_PUBLISHER_NAME: ${{ secrets.AZURE_TRUSTED_SIGNING_PUBLISHER_NAME }}
-        run: npx --no-install electron-builder --config electron-builder.windows-release.cjs --win --x64 --publish=never
+        run: npx --no-install electron-builder --config scripts/electron-builder.windows-release.cjs --win --x64 --publish=never
 
       # The `secrets` context is not available in step `if` expressions, so the
       # gate is computed into an env var instead. Without signing secrets this
