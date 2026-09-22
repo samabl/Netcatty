@@ -68,11 +68,37 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # The et resolver defaults its release owner to GITHUB_REPOSITORY's owner,
+      # which on a fork resolves to a nonexistent `<fork>/Netcatty-et-bin` and
+      # soft-skips with only a warning. Pin the upstream binary repos instead.
       - name: Fetch bundled mosh-client
+        env:
+          MOSH_BIN_OWNER: binaricat
+          MOSH_BIN_REPO: MoshCatty
         run: npm run fetch:mosh:dev
 
       - name: Fetch bundled et-client
+        env:
+          ET_BIN_OWNER: binaricat
+          ET_BIN_REPO: Netcatty-et-bin
         run: npm run fetch:et:dev
+
+      # Both fetchers exit 0 when they skip, so assert the binaries really
+      # landed - otherwise the release would ship without mosh/et.
+      - name: Verify bundled runtimes are present
+        shell: bash
+        run: |
+          set -euo pipefail
+          missing=0
+          for f in resources/mosh/win32-x64/mosh-client.exe resources/et/win32-x64/et.exe; do
+            if [[ -f "${f}" ]]; then
+              echo "ok: ${f} ($(stat -c%s "${f}" 2>/dev/null || echo '?') bytes)"
+            else
+              echo "::error::bundled runtime missing: ${f}"
+              missing=1
+            fi
+          done
+          exit ${missing}
 
       - name: Resolve version
         id: version
