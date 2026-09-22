@@ -1,0 +1,137 @@
+name: windows-release
+
+# Windows-only pipeline for this fork: a push to `main` (or a `v*` tag) builds
+# the Windows x64 packages and publishes them as a GitHub Release. Manual runs
+# can inject a version and opt out of publishing.
+#
+# Deliberately separate from the upstream `build.yml`: that workflow runs a
+# three-platform matrix and gates publishing behind upstream release secrets,
+# which a fork does not inherit.
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+      - "v[0-9]+.[0-9]+.[0-9]+-[0-9A-Za-z]*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to inject (semver, leading v optional). Empty derives one from the run number."
+        type: string
+        default: ""
+      publish_release:
+        description: "Publish a GitHub Release after a successful build"
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: windows-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-windows:
+    name: build-windows-x64
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+
+      # node-pty, windows-process-tree and sqlite3 are compiled by the
+      # postinstall install-app-deps step, so the MSVC environment must exist
+      # before npm ci runs.
+      - name: Set up MSVC developer command prompt
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Restore Electron download cache
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/AppData/Local/electron/Cache
+            ~/AppData/Local/electron-builder/Cache
+          key: electron-win-x64-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            electron-win-x64-
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Fetch bundled mosh-client
+        run: npm run fetch:mosh:dev
+
+      - name: Fetch bundled et-client
+        run: npm run fetch:et:dev
+
+      - name: Resolve version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          input_version="${{ inputs.version }}"
+          if [[ -n "${input_version}" ]]; then
+            version="${input_version#v}"
+          elif [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            version="${GITHUB_REF_NAME#v}"
+          else
+            version="0.0.0-build.${GITHUB_RUN_NUMBER}"
+          fi
+          # npm pkg and electron-builder both reject non-semver values.
+          if [[ ! "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Resolved version '${version}' is not semver"
+            exit 1
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "Setting version to ${version}"
+          npm pkg set version="${version}"
+
+      - name: Build Windows packages
+        env:
+          # No signing certificate on a fork: make that explicit instead of
+          # letting electron-builder probe for an identity.
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+          ELECTRON_BUILDER_PUBLISH: "never"
+          VITE_SYNC_GITHUB_CLIENT_ID: ${{ secrets.VITE_SYNC_GITHUB_CLIENT_ID }}
+          VITE_SYNC_GOOGLE_CLIENT_ID: ${{ secrets.VITE_SYNC_GOOGLE_CLIENT_ID }}
+          VITE_SYNC_GOOGLE_CLIENT_SECRET: ${{ secrets.VITE_SYNC_GOOGLE_CLIENT_SECRET }}
+          VITE_SYNC_ONEDRIVE_CLIENT_ID: ${{ secrets.VITE_SYNC_ONEDRIVE_CLIENT_ID }}
+        run: npm run pack:win-x64
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: netcatty-windows-x64
+          path: |
+            release/*.exe
+            release/*.zip
+            release/*.yml
+            release/*.blockmap
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Create GitHub Release
+        if: ${{ github.event_name == 'push' || inputs.publish_release }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.version.outputs.version }}
+          name: Netcatty v${{ steps.version.outputs.version }} (Windows x64)
+          target_commitish: ${{ github.sha }}
+          generate_release_notes: true
+          fail_on_unmatched_files: false
+          files: |
+            release/*.exe
+            release/*.zip
+            release/latest.yml
+            release/*.blockmap
+          token: ${{ secrets.GITHUB_TOKEN }}
