@@ -231,6 +231,7 @@ server.resource(
 );
 
 // Start with core tools; load specialized catalog groups through load_netcatty_tools.
+// Clients that ignore tools/list_changed reach them through call_netcatty_tool.
 registerProgressiveMcpTools(server, {
   rpcCall,
   scopeParams,

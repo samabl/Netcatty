@@ -248,6 +248,7 @@ function registerMcpTools(server, deps, tools = listMcpTools()) {
 module.exports = {
   buildZodSchema,
   buildZodShapeObject,
+  createToolHandler,
   isEmptyMcpInputShape,
   formatRpcError,
   formatTerminalExecuteResult,
