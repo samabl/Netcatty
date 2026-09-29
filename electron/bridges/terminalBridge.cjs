@@ -2308,6 +2308,18 @@ function closeSession(event, payload) {
   } finally {
     cleanupMoshAuthTempFiles(session.moshAuthTempFiles);
   }
+  // Finalize this session's auto-save log stream. SSH and local PTYs stop theirs
+  // inline from their transport exit handlers, which run while the session is
+  // still registered; serial/Mosh/ET close asynchronously (serialPort.close() /
+  // proc.kill()), so their exit handlers fire after the sessions.delete() below
+  // and bail out on the registry guard before reaching stopStream. Without this
+  // the stream entry, its 500 ms flush timer and its open write stream survive
+  // the tab for the rest of the app run, and the file stays "active" so
+  // Settings -> Clear all logs skips it. Token-scoped and idempotent, so a
+  // reconnect that already started a fresh stream on this id is left alone.
+  if (!session.stream) {
+    void sessionLogStreamManager.stopStream(payload.sessionId, session.logStreamToken);
+  }
   ptyProcessTree.unregisterPid(payload.sessionId);
   sessions.delete(payload.sessionId);
   forgetBootEpoch(payload.sessionId, payload?.bootEpoch);

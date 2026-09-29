@@ -57,6 +57,8 @@ function createExecHandlerApi(ctx) {
     
       const sshClient = session.conn || session.sshClient;
       const ptyStream = session.stream || session.pty || session.proc;
+      // Live session truth: serial sessions expose a raw byte stream, never a PTY.
+      const isSerialSession = session.protocol === "serial" || session.type === "serial";
       return {
         ok: true,
         context: {
@@ -66,6 +68,7 @@ function createExecHandlerApi(ctx) {
           chatSessionId,
           sessionProtocol,
           isNetworkDevice,
+          isSerialSession,
           sshClient,
           ptyStream,
         },
@@ -82,6 +85,7 @@ function createExecHandlerApi(ctx) {
         chatSessionId,
         sessionProtocol,
         isNetworkDevice,
+        isSerialSession,
         sshClient,
         ptyStream,
       } = resolved.context;
@@ -112,6 +116,30 @@ function createExecHandlerApi(ctx) {
           return { ok: false, error: err?.message || String(err) };
         }
       };
+    
+      // Serial ports are raw byte streams, not PTYs. The command is sent as-is
+      // (no shell wrapping) and completion is detected by idle timeout. This must
+      // run before the PTY branches below: serial sessions are also flagged as
+      // network devices, so the network-device guard further down would otherwise
+      // reject them with "no writable PTY stream" and the serial path never ran.
+      if (isSerialSession) {
+        if (!session.serialPort || typeof session.serialPort.write !== "function") {
+          releaseSessionExecution(sessionId, sessionToken);
+          executionLock.release();
+          return { ok: false, error: "Serial session has no writable port for command execution" };
+        }
+        if (session.ymodemActive || session.zmodemSentry?.isActive?.()) {
+          releaseSessionExecution(sessionId, sessionToken);
+          executionLock.release();
+          return { ok: false, error: "Serial file transfer is already in progress" };
+        }
+        return runExecution(() => execViaRawPty(session.serialPort, command, {
+          timeoutMs: commandTimeoutMs,
+          trackForCancellation: activePtyExecs,
+          chatSessionId: params?.chatSessionId,
+          encoding: session.serialEncoding || "utf8",
+        }));
+      }
     
       // Network devices (switches/routers) connected via SSH: use raw execution.
       // Their vendor CLIs (Huawei VRP, Cisco IOS, etc.) don't run a POSIX shell,
@@ -195,21 +223,6 @@ function createExecHandlerApi(ctx) {
         });
       }
     
-      // Serial port: raw command execution (no shell wrapping)
-      if (session.protocol === "serial" && session.serialPort && typeof session.serialPort.write === "function") {
-        if (session.ymodemActive || session.zmodemSentry?.isActive?.()) {
-          releaseSessionExecution(sessionId, sessionToken);
-          executionLock.release();
-          return { ok: false, error: "Serial file transfer is already in progress" };
-        }
-        return runExecution(() => execViaRawPty(session.serialPort, command, {
-          timeoutMs: commandTimeoutMs,
-          trackForCancellation: activePtyExecs,
-          chatSessionId: params?.chatSessionId,
-          encoding: session.serialEncoding || "utf8",
-        }));
-      }
-    
       releaseSessionExecution(sessionId, sessionToken);
       executionLock.release();
       return { ok: false, error: "Session does not support command execution" };
@@ -231,7 +244,9 @@ function createExecHandlerApi(ctx) {
       if (isNetworkDevice || sessionProtocol === "serial") {
         return {
           ok: false,
-          error: "Background execution currently supports shell-backed PTY sessions only.",
+          error: sessionProtocol === "serial"
+            ? "Background execution is not available on serial sessions. Use terminal_execute for serial commands."
+            : "Background execution currently supports shell-backed PTY sessions only.",
         };
       }
     

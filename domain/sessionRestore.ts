@@ -99,7 +99,7 @@ const sanitizeProtocol = (value: unknown): TerminalSession["protocol"] | undefin
 };
 
 const sanitizeShellType = (value: unknown): TerminalSession["shellType"] | undefined => (
-  isOneOf(value, ["posix", "fish", "powershell", "cmd", "unknown"] as const) ? value : undefined
+  isOneOf(value, ["posix", "fish", "powershell", "cmd", "raw", "unknown"] as const) ? value : undefined
 );
 
 const sanitizeSerialConfig = (value: unknown): SerialConfig | undefined => {

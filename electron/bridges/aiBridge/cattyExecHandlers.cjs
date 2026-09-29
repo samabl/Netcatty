@@ -33,7 +33,13 @@ async function proxyCattyExecToWorker({
   if (busyErr) return busyErr;
 
   const meta = getWorkerExecutionMeta(mcpServerBridge, sessionId, chatSessionId);
-  if (!isNetworkDeviceLike(meta)) {
+  const metaProtocol = String(meta.protocol || "").trim();
+  // No protocol means the renderer metadata has not caught up with a freshly
+  // opened tab, so a serial/network-device session cannot be told apart from a
+  // shell session here. Defer to the terminal worker, which owns the live
+  // session and applies the configured blocklist (skipping it only for serial
+  // and network devices, where commands like `reboot` are routine).
+  if (metaProtocol && !isNetworkDeviceLike(meta)) {
     // No live session here: settings additions plus common defaults only; the
     // terminal worker re-runs the shell-selected defaults on the live session.
     const safety = meta.shellType
@@ -138,6 +144,32 @@ function registerCattyExecHandlers(ctx) {
       }
 
       const ptyStream = session.stream || session.pty || session.proc;
+      // Live session truth: serial sessions expose a raw byte stream, never a PTY.
+      const isSerialSession = session.protocol === "serial" || session.type === "serial";
+
+      // Serial ports are raw byte streams, not PTYs. The command is sent as-is
+      // (no shell wrapping) and completion is detected by idle timeout. This must
+      // run before the PTY branches below: serial sessions are also flagged as
+      // network devices, so the network-device guard further down would otherwise
+      // reject them with "no writable PTY stream" and the serial path never ran.
+      if (isSerialSession) {
+        if (!session.serialPort || typeof session.serialPort.write !== "function") {
+          releaseLock();
+          return { ok: false, error: "Serial session has no writable port for command execution" };
+        }
+        if (session.ymodemActive || session.zmodemSentry?.isActive?.()) {
+          releaseLock();
+          return { ok: false, error: "Serial file transfer is already in progress" };
+        }
+        const { execViaRawPty } = require("./ai/ptyExec.cjs");
+        const serialTimeoutMs = mcpServerBridge.getCommandTimeoutMs ? mcpServerBridge.getCommandTimeoutMs() : 60000;
+        return withLockRelease(() => execViaRawPty(session.serialPort, command, {
+          timeoutMs: serialTimeoutMs,
+          trackForCancellation: mcpServerBridge.activePtyExecs,
+          chatSessionId,
+          encoding: session.serialEncoding || "utf8",
+        }));
+      }
 
       // Network devices (switches/routers) connected via SSH: use raw execution.
       // Their vendor CLIs don't run a POSIX shell, so shell-wrapped commands fail.
@@ -238,22 +270,6 @@ function registerCattyExecHandlers(ctx) {
             chatSessionId,
           });
         });
-      }
-
-      // Serial port: raw command execution (no shell wrapping)
-      if (session.protocol === "serial" && session.serialPort && typeof session.serialPort.write === "function") {
-        if (session.ymodemActive || session.zmodemSentry?.isActive?.()) {
-          releaseLock();
-          return { ok: false, error: "Serial file transfer is already in progress" };
-        }
-        const { execViaRawPty } = require("./ai/ptyExec.cjs");
-        const serialTimeoutMs = mcpServerBridge.getCommandTimeoutMs ? mcpServerBridge.getCommandTimeoutMs() : 60000;
-        return withLockRelease(() => execViaRawPty(session.serialPort, command, {
-          timeoutMs: serialTimeoutMs,
-          trackForCancellation: mcpServerBridge.activePtyExecs,
-          chatSessionId,
-          encoding: session.serialEncoding || "utf8",
-        }));
       }
 
       releaseLock();

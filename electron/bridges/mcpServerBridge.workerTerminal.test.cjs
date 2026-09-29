@@ -3,6 +3,8 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
 
+const DEFAULT_COMMAND_BLOCKLIST = require("../../lib/commandBlocklist.cjs");
+
 function loadFreshBridge() {
   const bridgePath = require.resolve("./mcpServerBridge.cjs");
   delete require.cache[bridgePath];
@@ -687,4 +689,68 @@ test("terminal close cancels a worker job start that finishes late", async () =>
     "netcatty:ai:jobStart",
     "netcatty:ai:jobStop",
   ]);
+});
+
+test("worker exec defers the shell blocklist when the session protocol is unknown", async () => {
+  // Renderer metadata can lag a freshly opened tab. Without a protocol a serial
+  // device session looks like a shell session here, so applying the common
+  // patterns blocked routine device commands (`reboot`/`shutdown`) even though
+  // the live worker session would skip shell patterns for serial.
+  const requests = [];
+  const bridge = loadFreshBridge();
+  bridge.init({
+    sessions: new Map(),
+    electronModule: null,
+    terminalWorkerManager: {
+      request(channel, payload) {
+        requests.push({ channel, payload });
+        return Promise.resolve({ ok: true, stdout: "rebooted\n", stderr: "", exitCode: null });
+      },
+    },
+  });
+  bridge.setPermissionMode("auto");
+  bridge.setCommandBlocklist(DEFAULT_COMMAND_BLOCKLIST);
+  bridge.updateSessionMetadata([
+    { sessionId: "serial-unknown", hostname: "/dev/ttyUSB0", connected: true },
+  ], "chat-serial");
+
+  const result = await bridge.dispatchBuiltinRpc("netcatty/exec", {
+    sessionId: "serial-unknown",
+    command: "reboot",
+    chatSessionId: "chat-serial",
+  });
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(requests.map((entry) => entry.channel), ["netcatty:ai:exec"]);
+  assert.equal(requests[0].payload.sessionMeta.protocol, "");
+});
+
+test("worker exec still applies the shell blocklist when the protocol is known", async () => {
+  const requests = [];
+  const bridge = loadFreshBridge();
+  bridge.init({
+    sessions: new Map(),
+    electronModule: null,
+    terminalWorkerManager: {
+      request(channel, payload) {
+        requests.push({ channel, payload });
+        return Promise.resolve({ ok: true, stdout: "ran\n" });
+      },
+    },
+  });
+  bridge.setPermissionMode("auto");
+  bridge.setCommandBlocklist(DEFAULT_COMMAND_BLOCKLIST);
+  bridge.updateSessionMetadata([
+    { sessionId: "ssh-known", hostname: "host.example", protocol: "ssh", connected: true },
+  ], "chat-ssh");
+
+  const blocked = await bridge.dispatchBuiltinRpc("netcatty/exec", {
+    sessionId: "ssh-known",
+    command: "reboot",
+    chatSessionId: "chat-ssh",
+  });
+
+  assert.equal(blocked.ok, false);
+  assert.match(blocked.error, /Command blocked by safety policy/);
+  assert.deepEqual(requests, [], "a blocked command must not reach the terminal worker");
 });

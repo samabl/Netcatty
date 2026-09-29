@@ -7,7 +7,7 @@
 const TOOL_INPUT_FIELDS = Object.freeze({
   "terminal.execute": {
     sessionId: { type: "string", description: "The terminal session ID to execute on." },
-    command: { type: "string", description: "The shell command to execute in the target session." },
+    command: { type: "string", description: "The command to run in the target session: a shell command, or the device's own CLI command on serial / network-device sessions." },
   },
   "terminal.start": {
     sessionId: { type: "string", description: "The terminal session ID to start a long-running command on." },
@@ -386,9 +386,9 @@ const MODEL_DESCRIPTION_HINTS = Object.freeze({
   "session.environment":
     "Call this first for any task involving a live Netcatty terminal, remote server, SSH session, SFTP path, or terminal tab. Select the target by label or hostname, then pass its sessionId to terminal and SFTP tools. Call it again after the user opens, closes, or renames a session.",
   "terminal.execute":
-    "Use this instead of the local shell when the command is intended for a Netcatty terminal or remote host. Call get_environment first to resolve the sessionId. Use only for commands expected to finish within about 60 seconds. For long-running commands use terminal_start and terminal_poll. Commands run in an isolated subshell of the visible terminal: the user sees the output live, but shell state such as cd, export, or set does not persist between calls — use absolute paths or combine cd with the command (cd /path && cmd).",
+    "Use this instead of the local shell when the command is intended for a Netcatty terminal or remote host. Call get_environment first to resolve the sessionId. Use only for commands expected to finish within about 60 seconds. For long-running shell-session commands use terminal_start and terminal_poll. On shell sessions the command runs in an isolated subshell of the visible terminal: the user sees the output live, but shell state such as cd, export, or set does not persist between calls — use absolute paths or combine cd with the command (cd /path && cmd). On serial sessions (protocol: serial) and network-device sessions there is no shell: the command is sent to the device as-is, so shell syntax such as pipes, redirects, $() or cd does not apply — use the device's native CLI commands, and note that exit codes are unavailable.",
   "terminal.start":
-    "Use this instead of the local shell for long-running commands on a Netcatty terminal or remote host. Call get_environment first to resolve the sessionId. Prefer for builds, scans, log-following, or anything likely to exceed about 2 minutes. Shell state such as cd or export does not persist between calls — combine cd with the command.",
+    "Use this instead of the local shell for long-running commands on a Netcatty terminal or remote host. Call get_environment first to resolve the sessionId. Prefer for builds, scans, log-following, or anything likely to exceed about 2 minutes. Shell state such as cd or export does not persist between calls — combine cd with the command. Background execution needs a shell prompt to detect completion, so it is not available on serial sessions (protocol: serial) or network-device sessions without a writable PTY — run those commands one at a time with terminal_execute.",
   "terminal.poll":
     "Wait at least about 30 seconds between polls unless output justifies checking sooner.",
   "vault.host.notes.get":

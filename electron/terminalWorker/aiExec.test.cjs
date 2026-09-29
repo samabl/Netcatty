@@ -563,3 +563,90 @@ test("worker exec on an unclassified posix session still blocks command substitu
     "blocked commands must not reach the PTY",
   );
 });
+
+test("worker serial exec sends the raw command to the serial port", async () => {
+  // Regression: serial sessions are flagged as network devices but expose no PTY,
+  // so the network-device guard used to reject them before the serial branch ran.
+  const serialPort = new FakePty();
+  const sessions = new Map([
+    ["serial-1", {
+      protocol: "serial",
+      type: "serial",
+      shellKind: "raw",
+      serialPort,
+      serialEncoding: "gb18030",
+    }],
+  ]);
+  const ipcMain = createFakeIpcMain();
+  registerWorkerAiExecHandlers(ipcMain, { sessions });
+
+  const result = await ipcMain.handlers.get("netcatty:ai:exec")(createFakeEvent(), {
+    sessionId: "serial-1",
+    command: "show version",
+    chatSessionId: "chat-serial",
+    commandTimeoutMs: 60,
+    sessionMeta: { protocol: "serial", deviceType: "network" },
+  });
+
+  assert.deepEqual(serialPort.writes, ["show version\r"]);
+  assert.notEqual(
+    result.error,
+    "Network device session has no writable PTY stream for command execution",
+  );
+  assert.equal(result.ok, true);
+  assert.equal(result.exitCode, null);
+  assert.match(result.stdout, /no output received/);
+});
+
+test("worker serial exec refuses to write while a serial file transfer is active", async () => {
+  const serialPort = new FakePty();
+  const sessions = new Map([
+    ["serial-busy", {
+      protocol: "serial",
+      type: "serial",
+      shellKind: "raw",
+      serialPort,
+      ymodemActive: true,
+    }],
+  ]);
+  const ipcMain = createFakeIpcMain();
+  registerWorkerAiExecHandlers(ipcMain, { sessions });
+
+  const result = await ipcMain.handlers.get("netcatty:ai:exec")(createFakeEvent(), {
+    sessionId: "serial-busy",
+    command: "show version",
+    chatSessionId: "chat-serial",
+    commandTimeoutMs: 60,
+    sessionMeta: { protocol: "serial", deviceType: "network" },
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.error, "Serial file transfer is already in progress");
+  assert.deepEqual(serialPort.writes, []);
+});
+
+test("worker serial background start redirects the caller to terminal_execute", async () => {
+  const serialPort = new FakePty();
+  const sessions = new Map([
+    ["serial-1", {
+      protocol: "serial",
+      type: "serial",
+      shellKind: "raw",
+      serialPort,
+    }],
+  ]);
+  const ipcMain = createFakeIpcMain();
+  registerWorkerAiExecHandlers(ipcMain, { sessions });
+
+  const result = await ipcMain.handlers.get("netcatty:ai:jobStart")(createFakeEvent(), {
+    sessionId: "serial-1",
+    command: "ping 10.0.0.1",
+    chatSessionId: "chat-serial",
+    sessionMeta: { protocol: "serial", deviceType: "network" },
+  });
+
+  assert.equal(result.ok, false);
+  assert.match(result.error, /not available on serial sessions/);
+  assert.match(result.error, /terminal_execute/);
+  assert.deepEqual(serialPort.writes, []);
+});

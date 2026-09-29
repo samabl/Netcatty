@@ -258,6 +258,28 @@ function createWorkerAiExecHandler({
     }
 
     const ptyStream = session.stream || session.pty || session.proc;
+    // Live session truth: serial sessions expose a raw byte stream, never a PTY.
+    const isSerialSession = session.protocol === "serial" || session.type === "serial";
+
+    // Serial ports are raw byte streams, not PTYs. The command is sent as-is
+    // (no shell wrapping) and completion is detected by idle timeout. This must
+    // run before the PTY branches below: serial sessions are also flagged as
+    // network devices, so the network-device guard further down would otherwise
+    // reject them with "no writable PTY stream" and the serial path never ran.
+    if (isSerialSession) {
+      if (!session.serialPort || typeof session.serialPort.write !== "function") {
+        return { ok: false, error: "Serial session has no writable port for command execution" };
+      }
+      if (session.ymodemActive || session.zmodemSentry?.isActive?.()) {
+        return { ok: false, error: "Serial file transfer is already in progress" };
+      }
+      return execViaRawPty(session.serialPort, command, {
+        timeoutMs,
+        trackForCancellation: activePtyExecs,
+        chatSessionId,
+        encoding: session.serialEncoding || "utf8",
+      });
+    }
 
     if (isNetworkDevice && ptyStream && typeof ptyStream.write === "function") {
       return execViaRawPty(ptyStream, command, {
@@ -346,18 +368,6 @@ function createWorkerAiExecHandler({
       });
     }
 
-    if (session.protocol === "serial" && session.serialPort && typeof session.serialPort.write === "function") {
-      if (session.ymodemActive || session.zmodemSentry?.isActive?.()) {
-        return { ok: false, error: "Serial file transfer is already in progress" };
-      }
-      return execViaRawPty(session.serialPort, command, {
-        timeoutMs,
-        trackForCancellation: activePtyExecs,
-        chatSessionId,
-        encoding: session.serialEncoding || "utf8",
-      });
-    }
-
     return { ok: false, error: "No terminal stream or SSH client available for this session" };
   };
 }
@@ -403,7 +413,9 @@ function createWorkerAiJobStartHandler({
     if (isNetworkDevice || sessionProtocol === "serial") {
       return {
         ok: false,
-        error: "Background execution currently supports shell-backed PTY sessions only.",
+        error: sessionProtocol === "serial"
+          ? "Background execution is not available on serial sessions. Use terminal_execute for serial commands."
+          : "Background execution currently supports shell-backed PTY sessions only.",
       };
     }
 
