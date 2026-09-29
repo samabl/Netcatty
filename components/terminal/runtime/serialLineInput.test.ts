@@ -129,3 +129,53 @@ test("serial line mode backspace removes full surrogate pair for emoji", () => {
   assert.equal(bufferRef.current, "hi");
   assert.deepEqual(echoes, ["\b \b\b \b"]);
 });
+
+test("serial line mode Ctrl+U erases an ASCII buffer by display cells", () => {
+  const echoes: string[] = [];
+  const writes: string[] = [];
+  const bufferRef = { current: "show version" };
+
+  handleSerialLineModeInput("\x15", {
+    bufferRef,
+    localEcho: true,
+    writeToSession: (data) => writes.push(data),
+    writeToTerminal: (data) => echoes.push(data),
+  });
+
+  assert.equal(bufferRef.current, "");
+  assert.deepEqual(echoes, ["\b \b".repeat("show version".length)]);
+  assert.deepEqual(writes, [], "local line editing must not reach the device before Enter");
+});
+
+test("serial line mode Ctrl+U erases wide glyphs by their two cells", () => {
+  // Regression: the erase counted UTF-16 units, so buffered CJK/emoji glyphs
+  // kept one column on screen after Ctrl+U while backspace was already
+  // cell-aware (stringCellWidth).
+  const echoes: string[] = [];
+  const bufferRef = { current: "接口" };
+
+  handleSerialLineModeInput("\x15", {
+    bufferRef,
+    localEcho: true,
+    writeToSession: () => {},
+    writeToTerminal: (data) => echoes.push(data),
+  });
+
+  assert.equal(bufferRef.current, "");
+  assert.deepEqual(echoes, ["\b \b".repeat(4)]);
+});
+
+test("serial line mode Ctrl+U clears the buffer silently without local echo", () => {
+  const echoes: string[] = [];
+  const bufferRef = { current: "abc" };
+
+  handleSerialLineModeInput("\x15", {
+    bufferRef,
+    localEcho: false,
+    writeToSession: () => {},
+    writeToTerminal: (data) => echoes.push(data),
+  });
+
+  assert.equal(bufferRef.current, "");
+  assert.deepEqual(echoes, []);
+});

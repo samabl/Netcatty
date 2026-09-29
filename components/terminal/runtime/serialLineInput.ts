@@ -40,9 +40,13 @@ const clearLine = ({
   bufferRef,
   localEcho,
   writeToTerminal,
+  term,
 }: SerialLineModeInputOptions) => {
   if (localEcho && bufferRef.current.length > 0) {
-    writeToTerminal("\b \b".repeat(bufferRef.current.length));
+    // Erase by display cells, not UTF-16 units: a buffered CJK/emoji glyph
+    // occupies two columns, so a unit-counted erase leaves half of it on screen.
+    const cells = stringCellWidth(bufferRef.current, term);
+    writeToTerminal("\b \b".repeat(cells));
   }
   bufferRef.current = "";
 };

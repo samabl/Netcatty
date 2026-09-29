@@ -638,7 +638,7 @@ declare global {
     status: 'connecting' | 'connected' | 'disconnected';
     cwd?: string;
     title?: string;
-    shellType?: 'posix' | 'fish' | 'powershell' | 'cmd' | 'unknown';
+    shellType?: 'posix' | 'fish' | 'powershell' | 'cmd' | 'raw' | 'unknown';
     cols?: number;
     rows?: number;
     alternateScreen?: boolean;

@@ -98,6 +98,35 @@ test("copy session clones reuse SSH sources and preserve serial config", () => {
   assert.deepEqual(copied.serialConfig, { path: "/dev/tty.usbserial", baudRate: 115200 });
 });
 
+test("split session clones preserve serial config so the new pane can connect", () => {
+  // Regression: the split clone dropped serialConfig, and the serial starter
+  // refuses to open a port without it, so splitting a serial pane (including a
+  // saved serial host, whose config lives on the session) always ended in
+  // "No serial configuration provided".
+  const source = session({
+    protocol: "serial",
+    serialConfig: {
+      path: "/dev/tty.usbserial",
+      baudRate: 9600,
+      dataBits: 8,
+      stopBits: 1,
+      parity: "none",
+      flowControl: "none",
+      localEcho: true,
+      lineMode: true,
+    },
+  });
+
+  const split = createSplitTerminalSessionClone(source, { id: "split-serial" });
+
+  assert.deepEqual(split.serialConfig, source.serialConfig);
+  assert.notEqual(split.serialConfig, source.serialConfig, "clones must not share the serial config object");
+  // Mutating the clone must not change the source session's settings.
+  split.serialConfig!.lineMode = false;
+  assert.equal(source.serialConfig?.lineMode, true);
+  assert.equal(split.protocol, "serial");
+});
+
 test("copy session clones open a fresh connection when reuseConnection is false", () => {
   const fresh = createCopiedTerminalSessionClone(session(), { id: "copy-fresh", reuseConnection: false });
   assert.equal(fresh.reuseConnectionFromSessionId, undefined);

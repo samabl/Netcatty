@@ -608,6 +608,25 @@ test("sanitizeSessionRestorePayload drops invalid protocol and shell type enum v
   assert.equal(sanitized.sessions[0].shellType, undefined);
 });
 
+test("sanitizeSessionRestorePayload keeps the raw shell type serial sessions use", () => {
+  const sanitized = sanitizeSessionRestorePayload({
+    version: 1,
+    savedAt: 1,
+    activeTabId: "s1",
+    tabOrder: ["s1"],
+    sessions: [{
+      ...session("s1"),
+      protocol: "serial",
+      shellType: "raw",
+      serialConfig: { path: "/dev/ttyUSB0", baudRate: 115200 },
+    }],
+    workspaces: [],
+  });
+
+  assert.equal(sanitized.sessions[0].protocol, "serial");
+  assert.equal(sanitized.sessions[0].shellType, "raw");
+});
+
 test("sanitizeSessionRestorePayload falls back to equal split sizes when saved sizes are non-positive", () => {
   const sanitized = sanitizeSessionRestorePayload({
     version: 1,

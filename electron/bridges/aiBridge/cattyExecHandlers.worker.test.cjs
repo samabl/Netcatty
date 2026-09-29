@@ -12,6 +12,84 @@ function createFakeIpcMain() {
   };
 }
 
+function createWorkerExecHarness({ meta, commonSafety = { blocked: false }, shellSafety = { blocked: false } }) {
+  const ipcMain = createFakeIpcMain();
+  const requests = [];
+  const terminalWorkerManager = {
+    request(channel, payload, options) {
+      requests.push({ channel, payload, options });
+      return Promise.resolve({ ok: true, stdout: "ok\n" });
+    },
+  };
+  const mcpServerBridge = {
+    getPermissionMode: () => "auto",
+    getSessionBusyError: () => null,
+    reserveSessionExecution: () => ({ ok: true, token: "token-1" }),
+    releaseSessionExecution() {},
+    getSessionMeta: () => meta,
+    checkCommandSafetyForShell: () => shellSafety,
+    checkCommandSafetyCommonOnly: () => commonSafety,
+    resolveSessionBlocklistShellKind: () => "",
+    getCommandTimeoutMs: () => 12345,
+    getCommandBlocklist: () => [],
+    activePtyExecs: new Map(),
+  };
+
+  registerCattyExecHandlers({
+    ipcMain,
+    validateSender: () => true,
+    sessions: new Map(),
+    terminalWorkerManager,
+    mcpServerBridge,
+    electronModule: {},
+    safeSend() {},
+    execViaPty() {
+      throw new Error("main process should not execute without a real session");
+    },
+    getFreshIdlePrompt() {
+      return "";
+    },
+  });
+
+  return { ipcMain, requests };
+}
+
+test("catty AI exec defers the shell blocklist when renderer metadata has no protocol", async () => {
+  // Renderer metadata can lag a freshly opened tab. With no protocol a serial
+  // device session is indistinguishable from a shell session here, so applying
+  // the common patterns would block routine device commands (`reboot`) that the
+  // worker-owned live session would allow.
+  const { ipcMain, requests } = createWorkerExecHarness({
+    meta: { hostname: "/dev/ttyUSB0" },
+    commonSafety: { blocked: true, matchedPattern: "\\b(shutdown|reboot|poweroff|halt)\\b" },
+  });
+
+  const result = await ipcMain.handlers.get("netcatty:ai:exec")(
+    { sender: { id: 7 } },
+    { sessionId: "serial-1", command: "reboot", chatSessionId: "chat-1" },
+  );
+
+  assert.deepEqual(result, { ok: true, stdout: "ok\n" });
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].channel, "netcatty:ai:exec");
+});
+
+test("catty AI exec still applies the shell blocklist when the protocol is known", async () => {
+  const blockedHarness = createWorkerExecHarness({
+    meta: { protocol: "ssh", deviceType: "", hostname: "host.example" },
+    commonSafety: { blocked: true, matchedPattern: "\\b(shutdown|reboot|poweroff|halt)\\b" },
+  });
+
+  const blocked = await blockedHarness.ipcMain.handlers.get("netcatty:ai:exec")(
+    { sender: { id: 7 } },
+    { sessionId: "ssh-1", command: "reboot", chatSessionId: "chat-1" },
+  );
+
+  assert.equal(blocked.ok, false);
+  assert.match(blocked.error, /Command blocked by safety policy/);
+  assert.deepEqual(blockedHarness.requests, [], "a blocked command must not reach the terminal worker");
+});
+
 test("catty AI exec proxies to the terminal worker when the real session lives in the worker", async () => {
   const ipcMain = createFakeIpcMain();
   const requests = [];

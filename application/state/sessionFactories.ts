@@ -61,6 +61,10 @@ export const createSerialTerminalSession = (
     username: "",
     status: "connecting",
     protocol: "serial",
+    // Serial sessions have no shell; report the same discriminator the
+    // main-process session carries (shellKind: 'raw') so AI/MCP metadata and
+    // the CLI can recognize serial sessions by shellType as well as protocol.
+    shellType: "raw",
     serialConfig,
     charset: options?.charset,
   };
@@ -93,6 +97,8 @@ export const createHostTerminalSession = (
       username: "",
       status: "connecting",
       protocol: "serial",
+      // Serial has no shell — mirrors session.shellKind === 'raw' in main.
+      shellType: "raw",
       serialConfig,
       charset: host.charset,
     };

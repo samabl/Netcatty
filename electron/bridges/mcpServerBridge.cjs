@@ -1590,7 +1590,14 @@ async function handleWorkerTerminalExec(params = {}) {
 
   const chatSessionId = params?.chatSessionId || null;
   const meta = getSessionMeta(sessionId, chatSessionId) || {};
-  if (!isNetworkDeviceLikeMeta(meta)) {
+  const metaProtocol = String(meta.protocol || "").trim();
+  // With no protocol (renderer metadata can lag a freshly opened tab, and
+  // static-scope callers may not push any) a serial/network-device session is
+  // indistinguishable from a shell session here. Defer to the terminal worker
+  // instead of applying shell patterns: the worker re-runs the same configured
+  // blocklist against the live session and skips it only for serial and network
+  // devices, where commands like `reboot` are routine device operations.
+  if (metaProtocol && !isNetworkDeviceLikeMeta(meta)) {
     // meta.shellType is not reported for remote sessions yet; until it is,
     // defer the shell-selected default patterns to the terminal worker, which
     // resolves the shell kind from the live session and idle prompt.
@@ -1650,9 +1657,11 @@ async function handleWorkerJobStart(params = {}) {
 
   const chatSessionId = params?.chatSessionId || null;
   const meta = getSessionMeta(sessionId, chatSessionId) || {};
-  if (!isNetworkDeviceLikeMeta(meta)) {
-    // Same shell-aware deferral as handleWorkerTerminalExec: the terminal
-    // worker re-runs the shell-selected defaults on the live session.
+  const metaProtocol = String(meta.protocol || "").trim();
+  // Same shell-aware deferral as handleWorkerTerminalExec: without a protocol we
+  // cannot tell a serial/network-device session from a shell session, so let the
+  // terminal worker apply the configured blocklist to the live session.
+  if (metaProtocol && !isNetworkDeviceLikeMeta(meta)) {
     const safety = meta.shellType
       ? checkCommandSafetyForShell(command, meta.shellType)
       : checkCommandSafetyCommonOnly(command);

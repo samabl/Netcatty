@@ -83,6 +83,13 @@ function createTerminalSessionClone(
     localStartDir: isLocal && options.inheritedCwd ? options.inheritedCwd : session.localStartDir,
     fontSize: session.fontSize,
     fontSizeOverride: session.fontSizeOverride,
+    // Serial sessions carry their port/line settings on the session, never on
+    // the host, and the starter refuses to connect without them. Every clone
+    // (split and copy) must carry them or the new pane opens disconnected
+    // with "No serial configuration provided".
+    serialConfig: session.serialConfig == null
+      ? undefined
+      : structuredClone(session.serialConfig),
     ...(session.ephemeralHost ? { ephemeralHost: true } : {}),
     ...(injectsInheritedCwd && options.inheritedCwd ? { pendingInitialCwd: options.inheritedCwd } : {}),
     // Clearing `reuseConnectionFromSessionId` only disables source-specific
@@ -114,8 +121,5 @@ export function createCopiedTerminalSessionClone(
   session: TerminalSession,
   options: CloneSessionOptions,
 ): TerminalSession {
-  return {
-    ...createTerminalSessionClone(session, options),
-    serialConfig: session.serialConfig,
-  };
+  return createTerminalSessionClone(session, options);
 }

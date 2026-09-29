@@ -649,7 +649,9 @@ export interface TerminalSession {
   port?: number;
   moshEnabled?: boolean;
   etEnabled?: boolean;
-  shellType?: 'posix' | 'fish' | 'powershell' | 'cmd' | 'unknown';
+  // 'raw' marks serial sessions: the transport has no shell, so commands are
+  // written to the port as-is (mirrors session.shellKind === 'raw' in main).
+  shellType?: 'posix' | 'fish' | 'powershell' | 'cmd' | 'raw' | 'unknown';
   charset?: string; // Connection-time charset override (e.g. for quick-connect serial)
   // Serial-specific connection settings
   serialConfig?: SerialConfig;

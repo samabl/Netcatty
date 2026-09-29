@@ -93,7 +93,7 @@
     "toolName": "terminal_execute",
     "rpcMethod": "netcatty/exec",
     "localExecution": false,
-    "description": "Execute a short command in a terminal session and wait for completion. Use this instead of the local shell when the command is intended for a Netcatty terminal or remote host. Call get_environment first to resolve the sessionId. Use only for commands expected to finish within about 60 seconds. For long-running commands use terminal_start and terminal_poll. Commands run in an isolated subshell of the visible terminal: the user sees the output live, but shell state such as cd, export, or set does not persist between calls — use absolute paths or combine cd with the command (cd /path && cmd).",
+    "description": "Execute a short command in a terminal session and wait for completion. Use this instead of the local shell when the command is intended for a Netcatty terminal or remote host. Call get_environment first to resolve the sessionId. Use only for commands expected to finish within about 60 seconds. For long-running shell-session commands use terminal_start and terminal_poll. On shell sessions the command runs in an isolated subshell of the visible terminal: the user sees the output live, but shell state such as cd, export, or set does not persist between calls — use absolute paths or combine cd with the command (cd /path && cmd). On serial sessions (protocol: serial) and network-device sessions there is no shell: the command is sent to the device as-is, so shell syntax such as pipes, redirects, $() or cd does not apply — use the device's native CLI commands, and note that exit codes are unavailable.",
     "inputShape": {
       "sessionId": {
         "type": "string",
@@ -103,7 +103,7 @@
       "command": {
         "type": "string",
         "optional": false,
-        "description": "The shell command to execute in the target session."
+        "description": "The command to run in the target session: a shell command, or the device's own CLI command on serial / network-device sessions."
       }
     },
     "policy": {
@@ -122,7 +122,7 @@
     "toolName": "terminal_start",
     "rpcMethod": "netcatty/jobStart",
     "localExecution": false,
-    "description": "Start a long-running command in a terminal session. Use this instead of the local shell for long-running commands on a Netcatty terminal or remote host. Call get_environment first to resolve the sessionId. Prefer for builds, scans, log-following, or anything likely to exceed about 2 minutes. Shell state such as cd or export does not persist between calls — combine cd with the command.",
+    "description": "Start a long-running command in a terminal session. Use this instead of the local shell for long-running commands on a Netcatty terminal or remote host. Call get_environment first to resolve the sessionId. Prefer for builds, scans, log-following, or anything likely to exceed about 2 minutes. Shell state such as cd or export does not persist between calls — combine cd with the command. Background execution needs a shell prompt to detect completion, so it is not available on serial sessions (protocol: serial) or network-device sessions without a writable PTY — run those commands one at a time with terminal_execute.",
     "inputShape": {
       "sessionId": {
         "type": "string",

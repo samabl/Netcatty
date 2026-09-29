@@ -7,6 +7,7 @@ const test = require("node:test");
 
 const { createBackgroundJobApi } = require("./mcpServerBridge/backgroundJobs.cjs");
 const { createExecHandlerApi } = require("./mcpServerBridge/execHandlers.cjs");
+const { execViaRawPty } = require("./ai/ptyExec.cjs");
 const { PROBE_OUTPUT_MARKER } = require("./ai/sessionShellKind.cjs");
 const {
   checkBlocklistForShell,
@@ -264,4 +265,91 @@ test("MCP exec probes an unclassified PowerShell session before the authoritativ
 
   assert.equal(result.ok, true);
   assert.equal(session._loginShellKind, "powershell");
+});
+
+function serialSession(overrides = {}) {
+  return {
+    protocol: "serial",
+    type: "serial",
+    shellKind: "raw",
+    serialEncoding: "gb18030",
+    ...overrides,
+  };
+}
+
+test("MCP terminal_execute sends serial commands through the raw serial port", async () => {
+  // Regression: serial sessions are flagged as network devices but expose no PTY,
+  // so the network-device guard used to reject them before the serial branch ran.
+  const serialPort = new FakePty();
+  const sessions = new Map([["serial-1", serialSession({ serialPort })]]);
+  const ctx = createExecHandlerTestContext({ sessions, backgroundJobs: new Map() });
+  ctx.commandTimeoutMs = 60;
+  ctx.execViaRawPty = execViaRawPty;
+  const api = createExecHandlerApi(ctx);
+
+  const result = await api.handleExec({
+    sessionId: "serial-1",
+    command: "show version",
+    chatSessionId: "chat-serial",
+  });
+
+  assert.deepEqual(serialPort.writes, ["show version\r"]);
+  assert.notEqual(
+    result.error,
+    "Network device session has no writable PTY stream for command execution",
+  );
+  assert.equal(result.ok, true);
+  assert.equal(result.exitCode, null);
+  assert.match(result.stdout, /no output received/);
+  assert.equal(ctx.activeSessionExecutions.size, 0, "serial exec must release the session reservation");
+});
+
+test("MCP serial exec refuses to write while a serial file transfer is active", async () => {
+  const serialPort = new FakePty();
+  const sessions = new Map([["serial-busy", serialSession({
+    serialPort,
+    zmodemSentry: { isActive: () => true },
+  })]]);
+  const ctx = createExecHandlerTestContext({ sessions, backgroundJobs: new Map() });
+  ctx.execViaRawPty = () => {
+    throw new Error("must not write to the port during a serial file transfer");
+  };
+  const api = createExecHandlerApi(ctx);
+
+  const result = await api.handleExec({ sessionId: "serial-busy", command: "show version" });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.error, "Serial file transfer is already in progress");
+  assert.deepEqual(serialPort.writes, []);
+  assert.equal(ctx.activeSessionExecutions.size, 0);
+});
+
+test("MCP serial exec reports a missing serial port instead of the network-device PTY error", async () => {
+  const sessions = new Map([["serial-broken", serialSession()]]);
+  const ctx = createExecHandlerTestContext({ sessions, backgroundJobs: new Map() });
+  const api = createExecHandlerApi(ctx);
+
+  const result = await api.handleExec({ sessionId: "serial-broken", command: "show version" });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.error, "Serial session has no writable port for command execution");
+  assert.equal(ctx.activeSessionExecutions.size, 0);
+});
+
+test("MCP serial terminal_start redirects the caller to terminal_execute", async () => {
+  const serialPort = new FakePty();
+  const sessions = new Map([["serial-1", serialSession({ serialPort })]]);
+  const ctx = createExecHandlerTestContext({ sessions, backgroundJobs: new Map() });
+  const api = createExecHandlerApi(ctx);
+
+  const result = await api.handleJobStart({
+    sessionId: "serial-1",
+    command: "ping 10.0.0.1",
+    chatSessionId: "chat-serial",
+  });
+
+  assert.equal(result.ok, false);
+  assert.match(result.error, /not available on serial sessions/);
+  assert.match(result.error, /terminal_execute/);
+  assert.deepEqual(serialPort.writes, []);
 });

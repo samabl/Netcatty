@@ -74,6 +74,34 @@ test("serial session factories snapshot effective legacy Backspace behavior", ()
   assert.equal(explicitDefaultSession.serialConfig?.backspaceBehavior, "default");
 });
 
+test("serial session factories report the raw shell type the AI prompts key on", () => {
+  // Main's serial session carries shellKind: 'raw'; the renderer session must
+  // report the same value as shellType so AI/MCP metadata and the CLI can
+  // recognize serial sessions by the discriminator the prompts document.
+  const savedHostSession = createHostTerminalSession("session-1", host({
+    protocol: "serial",
+    hostname: "COM3",
+    port: 115200,
+    username: "",
+    serialConfig: { path: "COM3", baudRate: 115200 },
+  }));
+  const quickSession = createSerialTerminalSession("session-2", {
+    path: "COM4",
+    baudRate: 9600,
+  });
+  const workspaceSession = createWorkspaceHostTerminalSession("session-3", host({
+    protocol: "serial",
+    hostname: "COM5",
+    port: 57600,
+    username: "",
+    serialConfig: { path: "COM5", baudRate: 57600 },
+  }), "workspace-1");
+
+  assert.equal(savedHostSession.shellType, "raw");
+  assert.equal(quickSession.shellType, "raw");
+  assert.equal(workspaceSession.shellType, "raw");
+});
+
 test("workspace host factory creates a complete serial session", () => {
   const session = createWorkspaceHostTerminalSession("session-serial", host({
     protocol: "serial",

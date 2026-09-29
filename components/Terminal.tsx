@@ -1028,7 +1028,9 @@ const TerminalComponent: React.FC<TerminalProps> = ({
             if (serialConfig?.localEcho) writeLocalTerminalData("\r\n");
           } else if (ch === "\x15") {
             if (serialConfig?.localEcho && serialLineBufferRef.current.length > 0) {
-              writeLocalTerminalData("\b \b".repeat(serialLineBufferRef.current.length));
+              // Erase by display cells: wide (CJK) glyphs occupy two columns.
+              const cells = stringCellWidth(serialLineBufferRef.current, termRef.current);
+              writeLocalTerminalData("\b \b".repeat(cells));
             }
             serialLineBufferRef.current = "";
           } else if (ch === "\b" || ch === "\x7f") {

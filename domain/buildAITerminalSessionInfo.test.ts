@@ -32,6 +32,21 @@ test("keeps explicit network deviceType", () => {
   assert.equal(info.deviceType, "network");
 });
 
+test("reports serial sessions with the raw shell discriminator the prompts document", () => {
+  // The Catty prompt, MCP context text and the CLI skill all tell the model to
+  // recognize serial sessions by `protocol: serial` / `shellType: raw`, so the
+  // renderer-derived metadata must actually carry both.
+  const info = buildAITerminalSessionInfo(
+    baseSession({ protocol: "serial", shellType: "raw" }),
+    baseHost({ protocol: "serial", deviceType: "network" }),
+    "linux",
+  );
+
+  assert.equal(info.protocol, "serial");
+  assert.equal(info.shellType, "raw");
+  assert.equal(info.deviceType, "network");
+});
+
 test("reports 'network' when the detected distro classifies as a network device (#2367)", () => {
   // Huawei VRP is a known network-device vendor id; the user has NOT flipped
   // Network Device Mode, so host.deviceType is unset.
