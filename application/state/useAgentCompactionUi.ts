@@ -15,6 +15,22 @@ export interface AgentContextUsage {
   estimated: boolean;
 }
 
+/**
+ * Presentation-only view of a completed compaction. Mirrors the fields the
+ * transcript chip needs — the runtime `CompactionTrace` stays authoritative.
+ */
+export interface CompactionResultUi {
+  sessionId: string;
+  trigger: ContextPrepareTrigger;
+  tokensBefore: number;
+  tokensAfter: number;
+  messagesBefore: number;
+  messagesAfter: number;
+  didLlmSummarize: boolean;
+  didTypedCompression: boolean;
+  did413Fallback: boolean;
+}
+
 function statusKeyForTrigger(trigger: ContextPrepareTrigger): string {
   switch (trigger) {
     case 'step':
@@ -51,6 +67,47 @@ export function compactionStatusText(
   translate: (key: string, params?: Record<string, string | number>) => string,
 ): string {
   return translate(statusKeyForTrigger(trigger));
+}
+
+/**
+ * Result of the most recent compaction for a chat session, for presentation
+ * only. Cleared when the session changes and when the next turn starts, so the
+ * chip never outlives the turn it belongs to.
+ */
+export function useAgentCompactionResult(
+  sessionId: string | null | undefined,
+): CompactionResultUi | null {
+  const [result, setResult] = useState<CompactionResultUi | null>(null);
+
+  useEffect(() => {
+    setResult(null);
+    if (!sessionId) return undefined;
+
+    const unsubscribe = getAgentRuntime().subscribe((event) => {
+      const eventSessionId = event.chatSessionId ?? event.sessionId;
+      if (eventSessionId !== sessionId) return;
+      if (event.type === 'turn_start') {
+        setResult((prev) => (prev?.sessionId === sessionId ? null : prev));
+        return;
+      }
+      if (event.type !== 'compaction') return;
+      const trace = event.trace;
+      setResult({
+        sessionId,
+        trigger: trace.trigger,
+        tokensBefore: trace.estimatedTokensBefore,
+        tokensAfter: trace.estimatedTokensAfter,
+        messagesBefore: trace.messagesBefore,
+        messagesAfter: trace.messagesAfter,
+        didLlmSummarize: trace.didLlmSummarize,
+        didTypedCompression: trace.didTypedCompression,
+        did413Fallback: trace.did413Fallback,
+      });
+    });
+    return unsubscribe;
+  }, [sessionId]);
+
+  return result?.sessionId === sessionId ? result : null;
 }
 
 export function resolveCompactionStatusText(

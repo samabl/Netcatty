@@ -7,8 +7,13 @@ import { useWindowControls } from '../application/state/useWindowControls';
 import type {
   AIDraft,
   AIPanelView,
+  AIPermissionMode,
+  AISession,
   AgentModelPreset,
   AISessionScope,
+  ChatMessage,
+  ChatMessageAttachment,
+  ProviderConfig,
   UploadedFile,
   DiscoveredAgent,
   ExternalAgentConfig,
@@ -65,7 +70,16 @@ import { stopAgentTurn } from '../infrastructure/ai/harness/agentStop';
 import { getAgentRuntime } from '../infrastructure/ai/harness/globalAgentRuntime';
 import { useAIPermissionGrantsState } from '../application/state/useAIPermissionGrantsState';
 import { useConversationExport } from './ai/hooks/useConversationExport';
-import { useAgentContextUsage } from '../application/state/useAgentCompactionUi';
+import {
+  useAgentContextUsage,
+  useAgentCompactionResult,
+} from '../application/state/useAgentCompactionUi';
+import { copyToClipboard } from './keychain/utils';
+import {
+  buildForkedSessionTitle,
+  clampContextCompactionToLength,
+  findResendAnchorIndex,
+} from '../domain/chatMessageActions';
 import type { AIChatSidePanelProps } from './AIChatSidePanel.types';
 import {
   buildCursorListModelsAgentEnv,
@@ -108,6 +122,12 @@ type SdkRuntimeModelTarget = {
 type SteerWarning = {
   reason: 'not-steerable' | 'busy' | 'inactive' | 'unsupported' | 'cancelled' | 'failed';
   turnKind?: 'review' | 'compact';
+};
+
+/** A user message being rewritten in the composer before its turn is re-run. */
+type MessageEditTarget = {
+  sessionId: string;
+  messageId: string;
 };
 
 const USER_SKILLS_STATUS_CACHE_TTL_MS = 60_000;
@@ -267,6 +287,8 @@ const AIChatSidePanelActive: React.FC<AIChatSidePanelProps> = ({
   addMessageToSession,
   updateLastMessage,
   updateMessageById,
+  truncateSessionFromMessage,
+  forkSessionFromMessage,
   persistContextCompaction,
   providers,
   activeProviderId,
@@ -317,6 +339,10 @@ const AIChatSidePanelActive: React.FC<AIChatSidePanelProps> = ({
   const [steeringSessionId, setSteeringSessionId] = useState<string | null>(null);
   const [userSkillOptions, setUserSkillOptions] = useState<UserSkillOption[]>([]);
   const [userSkillsStatusVersion, setUserSkillsStatusVersion] = useState(0);
+  /** Message being rewritten in the composer ("修改"), if any. */
+  const [editingMessage, setEditingMessage] = useState<MessageEditTarget | null>(null);
+  const editingMessageRef = useRef<MessageEditTarget | null>(editingMessage);
+  editingMessageRef.current = editingMessage;
   const { openSettingsWindow } = useWindowControls();
   const terminalSessionsRef = useRef(terminalSessions);
   terminalSessionsRef.current = terminalSessions;
@@ -412,6 +438,8 @@ const AIChatSidePanelActive: React.FC<AIChatSidePanelProps> = ({
   const isSteering = activeSessionId != null && steeringSessionId === activeSessionId;
   const currentAgentId = activeSession?.agentId ?? currentDraft?.agentId ?? defaultAgentId;
   const observedContextUsage = useAgentContextUsage(activeSessionId);
+  /** Presentation-only: what the last compaction in this session did. */
+  const compactionResult = useAgentCompactionResult(activeSessionId);
   const inputValue = pendingComposerTextRef.current ?? currentDraft?.text ?? '';
   const files = currentDraft?.attachments ?? [];
   const panelViewRef = useRef(normalizedPanelView);
@@ -1145,13 +1173,319 @@ const AIChatSidePanelActive: React.FC<AIChatSidePanelProps> = ({
   }, [currentAgentId, enterScopeDraftMode, updateScopeDraft]);
 
 
+  /**
+   * Shared turn dispatch for a session whose user message has already been
+   * decided. Composer sends, message edits and resends all funnel through here
+   * so their provider/model guards, placeholders, abort wiring and auto-title
+   * behaviour cannot drift apart.
+   */
+  const startSessionTurn = useCallback(async (turn: {
+    sessionId: string;
+    /** Session snapshot the turn must replay from (already truncated for edit/resend). */
+    session?: AISession;
+    isExternalAgent: boolean;
+    agentConfig?: ExternalAgentConfig;
+    userMessage: ChatMessage;
+    modelPrompt: string;
+    modelAttachments: ChatMessageAttachment[];
+    selectedSkillSlugs: string[];
+    titleText: string;
+    sendActiveProvider: ProviderConfig | undefined;
+    sendActiveModelId: string;
+    sendPermissionMode: AIPermissionMode;
+    selectedAgentModel: string;
+    /** The panel already showed this session before the send (not a fresh draft). */
+    existingSessionView: boolean;
+    /** Drop this scope's composer draft once the turn is accepted. */
+    clearComposerDraft: boolean;
+    keepPendingText: () => boolean;
+  }): Promise<void> => {
+    const { sessionId } = turn;
+    addMessageToSession(sessionId, turn.userMessage);
+
+    if (!turn.isExternalAgent && (!turn.sendActiveProvider || !turn.sendActiveModelId.trim())) {
+      addMessageToSession(sessionId, {
+        id: generateId(),
+        role: 'assistant',
+        content: turn.sendActiveProvider ? t('ai.chat.noProviderModel') : t('ai.chat.noProvider'),
+        timestamp: Date.now(),
+      });
+      if (turn.existingSessionView) {
+        if (turn.clearComposerDraft) clearScopeDraft({ keepPendingText: turn.keepPendingText() });
+        showScopeSessionView(sessionId);
+      }
+      return;
+    }
+
+    if (turn.clearComposerDraft) clearScopeDraft({ keepPendingText: turn.keepPendingText() });
+    showScopeSessionView(sessionId);
+    setActiveSessionId(sessionId);
+    setStreamingForScope(sessionId, true);
+
+    const assistantMsgId = generateId();
+    addMessageToSession(sessionId, {
+      id: assistantMsgId, role: 'assistant', content: '', timestamp: Date.now(),
+      model: turn.isExternalAgent
+        ? (turn.selectedAgentModel || turn.agentConfig?.name || 'external')
+        : (turn.sendActiveModelId || turn.sendActiveProvider?.defaultModel || ''),
+      providerId: turn.isExternalAgent ? undefined : turn.sendActiveProvider?.providerId,
+    });
+
+    const abortController = new AbortController();
+    abortControllersRef.current.set(sessionId, abortController);
+    const currentSession = turn.session
+      ?? sessionsRef.current.find((session) => session.id === sessionId);
+
+    if (!turn.isExternalAgent) {
+      const toolScope = {
+        type: scopeType,
+        targetId: scopeTargetId,
+        label: scopeLabel,
+      } as const;
+      await sendToCattyAgent(sessionId, scopeKey, turn.modelPrompt, abortController, currentSession, assistantMsgId, {
+        activeProvider: turn.sendActiveProvider,
+        activeModelId: turn.sendActiveModelId,
+        reasoningEffort: selectedCattyThinking,
+        scopeType,
+        scopeTargetId,
+        scopeLabel,
+        globalPermissionMode: turn.sendPermissionMode,
+        commandBlocklist,
+        commandTimeout,
+        responseIdleTimeout,
+        terminalSessions,
+        webSearchConfig,
+        getExecutorContext: () => buildExecutorContextForScope(toolScope),
+        autoTitleSession,
+        selectedUserSkillSlugs: turn.selectedSkillSlugs,
+        titleText: turn.titleText,
+      }, turn.modelAttachments.length > 0 ? turn.modelAttachments : undefined);
+      return;
+    }
+
+    if (!turn.agentConfig) {
+      updateMessageById(sessionId, assistantMsgId, msg => ({ ...msg, content: 'External agent not found. Please check settings.', executionStatus: 'failed' }));
+      setStreamingForScope(sessionId, false);
+      return;
+    }
+    try {
+      const existingExternalSessionId = currentSession?.externalSessionId;
+      await sendToExternalAgent(sessionId, assistantMsgId, turn.modelPrompt, turn.agentConfig, abortController, turn.modelAttachments, {
+        existingSessionId: existingExternalSessionId,
+        updateExternalSessionId: updateSessionExternalSessionId,
+        historyMessages: buildExternalAgentHistoryMessagesForBridge(currentSession?.messages ?? [], existingExternalSessionId),
+        terminalSessions,
+        defaultTargetSession,
+        providers,
+        selectedAgentModel: turn.selectedAgentModel,
+        toolIntegrationMode,
+        selectedUserSkillSlugs: turn.selectedSkillSlugs,
+        permissionMode: turn.sendPermissionMode,
+      });
+    } catch (err) {
+      reportStreamError(sessionId, abortController.signal, err);
+    }
+    updateLastMessage(sessionId, msg => msg.statusText ? { ...msg, statusText: '' } : msg);
+    setStreamingForScope(sessionId, false);
+    abortControllersRef.current.delete(sessionId);
+    autoTitleSession(sessionId, turn.titleText);
+  }, [
+    abortControllersRef,
+    addMessageToSession,
+    autoTitleSession,
+    buildExecutorContextForScope,
+    clearScopeDraft,
+    commandBlocklist,
+    commandTimeout,
+    defaultTargetSession,
+    providers,
+    reportStreamError,
+    responseIdleTimeout,
+    scopeKey,
+    scopeLabel,
+    scopeTargetId,
+    scopeType,
+    selectedCattyThinking,
+    sendToCattyAgent,
+    sendToExternalAgent,
+    sessionsRef,
+    setActiveSessionId,
+    setStreamingForScope,
+    showScopeSessionView,
+    t,
+    terminalSessions,
+    toolIntegrationMode,
+    updateLastMessage,
+    updateMessageById,
+    updateSessionExternalSessionId,
+    webSearchConfig,
+  ]);
+
+  /** Apply an in-progress message edit: truncate from that turn and re-run it. */
+  const submitEditedMessage = useCallback(async (text: string) => {
+    const editing = editingMessageRef.current;
+    const session = activeSessionRef.current;
+    const trimmed = text.trim();
+    if (!editing || !session || editing.sessionId !== session.id) {
+      editingMessageRef.current = null;
+      setEditingMessage(null);
+      return;
+    }
+    const messageIndex = session.messages.findIndex((m) => m.id === editing.messageId);
+    if (messageIndex === -1) {
+      editingMessageRef.current = null;
+      setEditingMessage(null);
+      return;
+    }
+    if (!trimmed && !(session.messages[messageIndex].attachments ?? []).length) return;
+
+    const original = session.messages[messageIndex];
+    const sendAgentId = session.agentId;
+    const agentConfig = sendAgentId !== 'catty'
+      ? findEnabledExternalAgent(externalAgents, sendAgentId)
+      : undefined;
+    if (sendAgentId !== 'catty' && !agentConfig) return;
+    if (isAIChatSessionStreaming(session.id)) return;
+    if (!tryBeginSendForKey(session.id)) return;
+
+    try {
+      const attachments = original.attachments ?? [];
+      const remaining = session.messages.slice(0, messageIndex);
+      truncateSessionFromMessage(session.id, original.id);
+      editingMessageRef.current = null;
+      setEditingMessage(null);
+      const isExternalAgent = sendAgentId !== 'catty';
+      await startSessionTurn({
+        sessionId: session.id,
+        session: {
+          ...session,
+          messages: remaining,
+          externalSessionId: undefined,
+          contextCompaction: clampContextCompactionToLength(
+            session.contextCompaction,
+            remaining.length,
+          ),
+        },
+        isExternalAgent,
+        agentConfig,
+        userMessage: {
+          ...original,
+          id: generateId(),
+          content: trimmed,
+          ...(attachments.length > 0 ? { attachments } : {}),
+          timestamp: Date.now(),
+          errorInfo: undefined,
+          executionStatus: undefined,
+          statusText: '',
+        },
+        modelPrompt: buildPromptWithTerminalSelectionAttachments(trimmed, attachments),
+        modelAttachments: attachments.filter((attachment) => !isInlineTextAttachment(attachment)),
+        selectedSkillSlugs: [],
+        titleText: trimmed,
+        sendActiveProvider: isExternalAgent ? activeProvider : effectiveActiveProvider,
+        sendActiveModelId: isExternalAgent ? activeModelId : effectiveActiveModelId,
+        sendPermissionMode: permissionModeRef.current,
+        selectedAgentModel: selectedAgentModel ?? '',
+        existingSessionView: true,
+        clearComposerDraft: true,
+        keepPendingText: () => false,
+      });
+    } finally {
+      endSendForKey(session.id);
+    }
+  }, [
+    activeModelId,
+    activeProvider,
+    effectiveActiveModelId,
+    effectiveActiveProvider,
+    externalAgents,
+    selectedAgentModel,
+    startSessionTurn,
+    truncateSessionFromMessage,
+  ]);
+
+  /** Re-run a turn from its user message, discarding the rewritten suffix. */
+  const handleResendMessage = useCallback(async (message: ChatMessage) => {
+    const session = activeSessionRef.current;
+    if (!session || isStreaming || isAIChatSessionStreaming(session.id)) return;
+    const anchorIndex = findResendAnchorIndex(session.messages, message.id);
+    if (anchorIndex < 0) return;
+
+    const anchor = session.messages[anchorIndex];
+    const trimmed = (anchor.content ?? '').trim();
+    const attachments = anchor.attachments ?? [];
+    if (!trimmed && attachments.length === 0) return;
+
+    const sendAgentId = session.agentId;
+    const agentConfig = sendAgentId !== 'catty'
+      ? findEnabledExternalAgent(externalAgents, sendAgentId)
+      : undefined;
+    if (sendAgentId !== 'catty' && !agentConfig) return;
+    if (!tryBeginSendForKey(session.id)) return;
+
+    try {
+      const remaining = session.messages.slice(0, anchorIndex);
+      truncateSessionFromMessage(session.id, anchor.id);
+      const isExternalAgent = sendAgentId !== 'catty';
+      await startSessionTurn({
+        sessionId: session.id,
+        session: {
+          ...session,
+          messages: remaining,
+          externalSessionId: undefined,
+          contextCompaction: clampContextCompactionToLength(
+            session.contextCompaction,
+            remaining.length,
+          ),
+        },
+        isExternalAgent,
+        agentConfig,
+        userMessage: {
+          ...anchor,
+          id: generateId(),
+          content: anchor.content,
+          timestamp: Date.now(),
+          errorInfo: undefined,
+          executionStatus: undefined,
+          statusText: '',
+        },
+        modelPrompt: buildPromptWithTerminalSelectionAttachments(trimmed, attachments),
+        modelAttachments: attachments.filter((attachment) => !isInlineTextAttachment(attachment)),
+        selectedSkillSlugs: [],
+        titleText: trimmed,
+        sendActiveProvider: isExternalAgent ? activeProvider : effectiveActiveProvider,
+        sendActiveModelId: isExternalAgent ? activeModelId : effectiveActiveModelId,
+        sendPermissionMode: permissionModeRef.current,
+        selectedAgentModel: selectedAgentModel ?? '',
+        existingSessionView: true,
+        clearComposerDraft: false,
+        keepPendingText: () => true,
+      });
+    } finally {
+      endSendForKey(session.id);
+    }
+  }, [
+    activeModelId,
+    activeProvider,
+    effectiveActiveModelId,
+    effectiveActiveProvider,
+    externalAgents,
+    isStreaming,
+    selectedAgentModel,
+    startSessionTurn,
+    truncateSessionFromMessage,
+  ]);
+
   const handleSend = useCallback(async () => {
+    if (editingMessageRef.current) {
+      await submitEditedMessage(pendingComposerTextRef.current ?? currentDraftRef.current?.text ?? '');
+      return;
+    }
     const draft = currentDraftRef.current;
     const currentPanelView = panelViewRef.current;
     const currentSessionView = activeSessionRef.current;
     if (!validateNoteMentions(draft?.attachments ?? [])) return;
     const trimmed = draft?.text.trim() ?? '';
-    const sendScopeKey = scopeKey;
     const attachments = (draft?.attachments ?? []).map((file) => ({
       base64Data: file.base64Data,
       mediaType: file.mediaType,
@@ -1277,113 +1611,31 @@ const AIChatSidePanelActive: React.FC<AIChatSidePanelProps> = ({
       }
 
       const isExternalAgent = sendAgentId !== 'catty';
-
       const sendActiveProvider = isExternalAgent ? activeProvider : effectiveActiveProvider;
       const sendActiveModelId = isExternalAgent ? activeModelId : effectiveActiveModelId;
 
-      if (!isExternalAgent && !sendActiveProvider) {
-        addMessageToSession(sessionId, {
+      await startSessionTurn({
+        sessionId,
+        session: currentSession ?? undefined,
+        isExternalAgent,
+        agentConfig,
+        userMessage: {
           id: generateId(), role: 'user', content: trimmed,
           ...(attachments.length > 0 ? { attachments } : {}),
           timestamp: Date.now(),
-        });
-        addMessageToSession(sessionId, { id: generateId(), role: 'assistant', content: t('ai.chat.noProvider'), timestamp: Date.now() });
-        if (currentPanelView.mode === 'session') {
-          clearScopeDraft({ keepPendingText: keepPendingAfterSend() });
-          showScopeSessionView(sessionId);
-        }
-        return;
-      }
-
-      if (!isExternalAgent && !sendActiveModelId.trim()) {
-        addMessageToSession(sessionId, {
-          id: generateId(), role: 'user', content: trimmed,
-          ...(attachments.length > 0 ? { attachments } : {}),
-          timestamp: Date.now(),
-        });
-        addMessageToSession(sessionId, { id: generateId(), role: 'assistant', content: t('ai.chat.noProviderModel'), timestamp: Date.now() });
-        if (currentPanelView.mode === 'session') {
-          clearScopeDraft({ keepPendingText: keepPendingAfterSend() });
-          showScopeSessionView(sessionId);
-        }
-        return;
-      }
-
-      addMessageToSession(sessionId, {
-        id: generateId(), role: 'user', content: trimmed,
-        ...(attachments.length > 0 ? { attachments } : {}),
-        timestamp: Date.now(),
+        },
+        modelPrompt,
+        modelAttachments,
+        selectedSkillSlugs,
+        titleText,
+        sendActiveProvider,
+        sendActiveModelId,
+        sendPermissionMode,
+        selectedAgentModel: sendSelectedAgentModel ?? '',
+        existingSessionView: currentPanelView.mode === 'session',
+        clearComposerDraft: true,
+        keepPendingText: keepPendingAfterSend,
       });
-      clearScopeDraft({ keepPendingText: keepPendingAfterSend() });
-      showScopeSessionView(sessionId);
-      setActiveSessionId(sessionId);
-      setStreamingForScope(sessionId, true);
-
-      const assistantMsgId = generateId();
-      addMessageToSession(sessionId, {
-        id: assistantMsgId, role: 'assistant', content: '', timestamp: Date.now(),
-        model: isExternalAgent
-          ? (sendSelectedAgentModel || agentConfig?.name || 'external')
-          : (sendActiveModelId || sendActiveProvider?.defaultModel || ''),
-        providerId: isExternalAgent ? undefined : sendActiveProvider?.providerId,
-      });
-
-      const abortController = new AbortController();
-      abortControllersRef.current.set(sessionId, abortController);
-      currentSession = currentSession ?? sessionsRef.current.find((session) => session.id === sessionId) ?? null;
-
-      if (isExternalAgent) {
-        if (!agentConfig) {
-          updateMessageById(sessionId, assistantMsgId, msg => ({ ...msg, content: 'External agent not found. Please check settings.', executionStatus: 'failed' }));
-          setStreamingForScope(sessionId, false);
-          return;
-        }
-        try {
-          const existingExternalSessionId = currentSession?.externalSessionId;
-          await sendToExternalAgent(sessionId, assistantMsgId, modelPrompt, agentConfig, abortController, modelAttachments, {
-            existingSessionId: existingExternalSessionId,
-            updateExternalSessionId: updateSessionExternalSessionId,
-            historyMessages: buildExternalAgentHistoryMessagesForBridge(currentSession?.messages ?? [], existingExternalSessionId),
-            terminalSessions,
-            defaultTargetSession,
-            providers,
-            selectedAgentModel: sendSelectedAgentModel,
-            toolIntegrationMode,
-            selectedUserSkillSlugs: selectedSkillSlugs,
-            permissionMode: sendPermissionMode,
-          });
-        } catch (err) {
-          reportStreamError(sessionId, abortController.signal, err);
-        }
-        updateLastMessage(sessionId, msg => msg.statusText ? { ...msg, statusText: '' } : msg);
-        setStreamingForScope(sessionId, false);
-        abortControllersRef.current.delete(sessionId);
-        autoTitleSession(sessionId, titleText);
-      } else {
-        const toolScope = {
-          type: scopeType,
-          targetId: scopeTargetId,
-          label: scopeLabel,
-        } as const;
-        await sendToCattyAgent(sessionId, sendScopeKey, modelPrompt, abortController, currentSession ?? undefined, assistantMsgId, {
-          activeProvider: sendActiveProvider,
-          activeModelId: sendActiveModelId,
-          reasoningEffort: selectedCattyThinking,
-          scopeType,
-          scopeTargetId,
-          scopeLabel,
-          globalPermissionMode: sendPermissionMode,
-          commandBlocklist,
-          commandTimeout,
-          responseIdleTimeout,
-          terminalSessions,
-          webSearchConfig,
-          getExecutorContext: () => buildExecutorContextForScope(toolScope),
-          autoTitleSession,
-          selectedUserSkillSlugs: selectedSkillSlugs,
-          titleText,
-        }, modelAttachments.length > 0 ? modelAttachments : undefined);
-      }
     } finally {
       setIsSending(false);
       endSendForKey(sendGateKey);
@@ -1392,18 +1644,16 @@ const AIChatSidePanelActive: React.FC<AIChatSidePanelProps> = ({
       }
     }
   }, [
-    validateNoteMentions, loadCodexConfigModel,
-    isStreaming, activeProvider, effectiveActiveProvider, effectiveActiveModelId, selectedCattyThinking, scopeKey, currentAgentId,
+    validateNoteMentions, loadCodexConfigModel, submitEditedMessage,
+    isStreaming, activeProvider, effectiveActiveProvider, effectiveActiveModelId, scopeKey, currentAgentId,
     activeModelId, externalAgents,
-    createSession, addMessageToSession, updateMessageById, updateLastMessage,
-    setStreamingForScope,
-    sendToExternalAgent, sendToCattyAgent, reportStreamError, autoTitleSession, t,
-    abortControllersRef, terminalSessions, defaultTargetSession, providers, selectedAgentModel, updateSessionExternalSessionId,
-    scopeType, scopeTargetId, scopeHostIds, scopeLabel, commandBlocklist, commandTimeout, responseIdleTimeout, webSearchConfig, buildExecutorContextForScope,
-    toolIntegrationMode,
+    createSession,
+    providers, selectedAgentModel,
+    scopeType, scopeTargetId, scopeHostIds, webSearchConfig,
     clearScopeDraft, showScopeSessionView, setActiveSessionId,
     flushDraftText, currentAgentConfig, buildExternalAgentRuntimeModelTarget,
     loadSdkRuntimeModelCatalog, applySdkRuntimeModelCatalog,
+    startSessionTurn,
   ]);
 
   const handleCompact = useCallback(async () => {
@@ -1614,6 +1864,73 @@ const AIChatSidePanelActive: React.FC<AIChatSidePanelProps> = ({
     [setActiveSessionId, showScopeSessionView],
   );
 
+  // ── Per-message transcript actions ──
+
+  /** Copy a message's text. Success is shown inline by the action bar. */
+  const handleCopyMessage = useCallback(async (message: ChatMessage) => {
+    const text = message.content ?? '';
+    if (!text.trim()) return;
+    const copied = await copyToClipboard(text);
+    if (!copied) toast.error(t('ai.chat.messageAction.copyFailed'));
+  }, [t]);
+
+  /**
+   * Start rewriting a user message. The composer is prefilled with the original
+   * text; submitting truncates the session at that message and re-runs the turn
+   * with the edited text (attachments are preserved).
+   */
+  const handleEditMessage = useCallback((message: ChatMessage) => {
+    const session = activeSessionRef.current;
+    if (!session || message.role !== 'user') return;
+    if (isAIChatSessionStreaming(session.id)) return;
+    // A draft must exist so the composer can hold the edited text, but the
+    // session view must stay visible behind it.
+    enterScopeDraftMode(currentAgentId, true);
+    setEditingMessage({ sessionId: session.id, messageId: message.id });
+    pendingComposerTextRef.current = message.content;
+    currentDraftRef.current = {
+      ...(currentDraftRef.current ?? {
+        text: '',
+        agentId: currentAgentId,
+        attachments: [],
+        selectedUserSkillSlugs: [],
+        updatedAt: Date.now(),
+      }),
+      text: message.content,
+      updatedAt: Date.now(),
+    };
+    updateScopeDraft(currentAgentId, (current) => (
+      current.text === message.content ? current : { ...current, text: message.content }
+    ));
+  }, [currentAgentId, enterScopeDraftMode, updateScopeDraft]);
+
+  const handleCancelMessageEdit = useCallback(() => {
+    setEditingMessage(null);
+    clearScopeDraft();
+  }, [clearScopeDraft]);
+
+  /** Fork the conversation at a message into a new session in this scope. */
+  const handleBranchMessage = useCallback((message: ChatMessage) => {
+    const session = activeSessionRef.current;
+    if (!session || isAIChatSessionStreaming(session.id)) return;
+    const forked = forkSessionFromMessage(session.id, message.id, {
+      title: buildForkedSessionTitle(session.title, t('ai.chat.messageAction.branchSuffix')),
+    });
+    if (!forked) return;
+    applyHistorySessionSelection(forked.id, {
+      showSessionView: showScopeSessionView,
+      setActiveSessionId,
+      closeHistory: () => setShowHistory(false),
+    });
+    toast.success(t('ai.chat.messageAction.branched'));
+  }, [forkSessionFromMessage, setActiveSessionId, showScopeSessionView, t]);
+
+  // Editing is scoped to one conversation; leaving it must not keep a stale
+  // edit target that would hijack the next send.
+  useEffect(() => {
+    setEditingMessage(null);
+  }, [activeSessionId, scopeKey]);
+
   const handleDeleteSession = useCallback(
     async (e: React.MouseEvent, sessionId: string) => {
       e.stopPropagation();
@@ -1705,6 +2022,14 @@ const AIChatSidePanelActive: React.FC<AIChatSidePanelProps> = ({
         activeCompaction={
           activeCompaction?.sessionId === activeSessionId ? activeCompaction : null
         }
+        compactionResult={compactionResult}
+        canRunMessageActions={canSendCurrentAgent && !isStreaming}
+        editingMessageId={editingMessage?.messageId ?? null}
+        onCopyMessage={handleCopyMessage}
+        onEditMessage={handleEditMessage}
+        onResendMessage={handleResendMessage}
+        onBranchMessage={handleBranchMessage}
+        onCancelMessageEdit={handleCancelMessageEdit}
         contextUsage={contextUsage}
         canCompact={canCompact}
         inputValue={inputValue}
@@ -1776,6 +2101,8 @@ const AI_CHAT_SIDE_PANEL_AI_STATE_KEYS = [
   'addMessageToSession',
   'updateLastMessage',
   'updateMessageById',
+  'truncateSessionFromMessage',
+  'forkSessionFromMessage',
   'persistContextCompaction',
   'providers',
   'activeProviderId',

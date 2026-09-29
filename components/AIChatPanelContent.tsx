@@ -1,5 +1,5 @@
 import React, { type Dispatch, type SetStateAction } from 'react';
-import { History, Plus } from 'lucide-react';
+import { History, Pencil, Plus, X } from 'lucide-react';
 import type { AIPermissionMode, AISession, ChatMessage, DiscoveredAgent, ExternalAgentConfig, AgentModelPreset, ProviderConfig, UploadedFile } from '../infrastructure/ai/types';
 import type { Host, VaultNote } from '../types';
 import type { UserSkillOption } from './ai/userSkillsState';
@@ -50,7 +50,17 @@ interface AIChatPanelContentProps {
   messages: ChatMessage[];
   isStreaming: boolean;
   activeCompaction?: import('../application/state/useAgentCompactionUi').ActiveCompactionUi | null;
+  /** Presentation-only result of the last compaction for the active session. */
+  compactionResult?: import('../application/state/useAgentCompactionUi').CompactionResultUi | null;
   contextUsage?: import('../application/state/useAgentCompactionUi').AgentContextUsage | null;
+  /** Message-level transcript actions (copy text / edit / resend / branch). */
+  canRunMessageActions?: boolean;
+  editingMessageId?: string | null;
+  onCopyMessage?: (message: ChatMessage) => void;
+  onEditMessage?: (message: ChatMessage) => void;
+  onResendMessage?: (message: ChatMessage) => void;
+  onBranchMessage?: (message: ChatMessage) => void;
+  onCancelMessageEdit?: () => void;
   inputValue: string;
   setInputValue: (value: string) => void;
   handleSend: () => void;
@@ -121,7 +131,15 @@ export const AIChatPanelContent: React.FC<AIChatPanelContentProps> = ({
   messages,
   isStreaming,
   activeCompaction = null,
+  compactionResult = null,
   contextUsage = null,
+  canRunMessageActions = false,
+  editingMessageId = null,
+  onCopyMessage,
+  onEditMessage,
+  onResendMessage,
+  onBranchMessage,
+  onCancelMessageEdit,
   inputValue,
   setInputValue,
   handleSend,
@@ -282,6 +300,14 @@ export const AIChatPanelContent: React.FC<AIChatPanelContentProps> = ({
                 isStreaming={isStreaming}
                 activeSessionId={activeSessionId}
                 activeCompaction={activeCompaction}
+                compactionResult={compactionResult}
+                contextCompaction={activeSession?.contextCompaction ?? null}
+                canRunMessageActions={canRunMessageActions}
+                editingMessageId={editingMessageId}
+                onCopyMessage={onCopyMessage}
+                onEditMessage={onEditMessage}
+                onResendMessage={onResendMessage}
+                onBranchMessage={onBranchMessage}
                 notes={notes}
                 hosts={hosts}
                 onOpenVaultNote={onOpenVaultNote}
@@ -327,6 +353,27 @@ export const AIChatPanelContent: React.FC<AIChatPanelContentProps> = ({
           {!hideInput && (
             <React.Profiler {...getAIPanelProfilerProps('AIChatPanel.Input')}>
               <div>
+                {editingMessageId && (
+                  <div
+                    role="status"
+                    data-ai-editing-message=""
+                    className="mx-3 mb-1.5 flex items-start gap-2 rounded-md border border-primary/25 bg-primary/[0.07] px-2.5 py-1.5 text-[11px] leading-4 text-foreground/80"
+                  >
+                    <Pencil size={12} className="mt-0.5 shrink-0 text-primary" />
+                    <div className="min-w-0 flex-1">
+                      <p className="font-medium">{t('ai.chat.editBanner.title')}</p>
+                      <p className="text-muted-foreground/70">{t('ai.chat.editBanner.description')}</p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={onCancelMessageEdit}
+                      aria-label={t('ai.chat.editBanner.cancel')}
+                      className="shrink-0 rounded p-0.5 text-muted-foreground/60 transition-colors hover:bg-white/[0.06] hover:text-foreground"
+                    >
+                      <X size={12} />
+                    </button>
+                  </div>
+                )}
                 {steerWarning ? (
                   <div role="status" className="mx-3 mb-1.5 rounded-md border border-amber-500/25 bg-amber-500/10 px-2.5 py-1.5 text-[11px] leading-4 text-amber-600 dark:text-amber-400">
                     {steerWarning}

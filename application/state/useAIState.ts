@@ -86,6 +86,7 @@ import {
   retargetWorkspaceActiveChatAfterMemberLoss,
   seedWorkspaceAIActiveSessionFromMembers,
 } from '../../domain/workspaceAiScopeHandoff';
+import { buildBranchMessages, clampContextCompactionToLength } from '../../domain/chatMessageActions';
 
 function providerPatchIsNoop(
   current: ProviderConfig,
@@ -106,6 +107,10 @@ function providerPatchIsNoop(
     return false;
   }
   return true;
+}
+
+function createAISessionId(now: number): string {
+  return `ai_${now}_${Math.random().toString(36).slice(2, 8)}`;
 }
 
 export function useAIState() {
@@ -678,7 +683,7 @@ export function useAIState() {
   const createSession = useCallback((scope: AISessionScope, agentId?: string): AISession => {
     const now = Date.now();
     const session: AISession = {
-      id: `ai_${now}_${Math.random().toString(36).slice(2, 8)}`,
+      id: createAISessionId(now),
       title: 'New Chat',
       agentId: agentId || defaultAgentId,
       scope,
@@ -841,6 +846,82 @@ export function useAIState() {
       return next;
     });
   }, [debouncedPersistSessions]);
+
+  /**
+   * Drop `messageId` and every message after it, so the turn can be re-run from
+   * that point (edit / resend). Returns how many messages were removed.
+   *
+   * The external SDK session id is cleared: external agents resume their own
+   * server-side thread, so keeping it would replay the untruncated history and
+   * silently ignore the edit.
+   */
+  const truncateSessionFromMessage = useCallback((sessionId: string, messageId: string): number => {
+    let removedCount = 0;
+    setSessionsRaw(prev => {
+      const sessionIndex = prev.findIndex(s => s.id === sessionId);
+      if (sessionIndex === -1) return prev;
+      const session = prev[sessionIndex];
+      const messageIndex = session.messages.findIndex(m => m.id === messageId);
+      if (messageIndex === -1) return prev;
+
+      removedCount = session.messages.length - messageIndex;
+      const messages = session.messages.slice(0, messageIndex);
+      const next = [...prev];
+      next[sessionIndex] = {
+        ...session,
+        messages,
+        externalSessionId: undefined,
+        contextCompaction: clampContextCompactionToLength(
+          session.contextCompaction,
+          messages.length,
+        ),
+        updatedAt: Date.now(),
+      };
+      setLatestAISessionsSnapshot(next);
+      debouncedPersistSessions();
+      return next;
+    });
+    return removedCount;
+  }, [debouncedPersistSessions]);
+
+  /**
+   * Fork the conversation at `messageId` (inclusive) into a new session in the
+   * same scope. The fork starts a fresh runtime thread, so it keeps no
+   * `externalSessionId`. Returns the new session, or null when the fork point
+   * is unusable.
+   */
+  const forkSessionFromMessage = useCallback((
+    sessionId: string,
+    messageId: string,
+    options?: { title?: string },
+  ): AISession | null => {
+    const source = sessionsRef.current.find(s => s.id === sessionId);
+    if (!source) return null;
+    const messages = buildBranchMessages(source.messages, messageId);
+    if (!messages || messages.length === 0) return null;
+
+    const now = Date.now();
+    const forked: AISession = {
+      id: createAISessionId(now),
+      title: options?.title?.trim() || source.title,
+      agentId: source.agentId,
+      scope: { ...source.scope },
+      messages,
+      contextCompaction: clampContextCompactionToLength(
+        source.contextCompaction,
+        messages.length,
+      ),
+      createdAt: now,
+      updatedAt: now,
+    };
+    setSessionsRaw(prev => {
+      const next = [forked, ...prev];
+      setLatestAISessionsSnapshot(next);
+      persistSessions(next);
+      return next;
+    });
+    return forked;
+  }, [persistSessions]);
 
   const persistContextCompaction = useCallback((
     sessionId: string,
@@ -1282,6 +1363,8 @@ export function useAIState() {
     addMessageToSession,
     updateLastMessage,
     updateMessageById,
+    truncateSessionFromMessage,
+    forkSessionFromMessage,
     persistContextCompaction,
     cleanupOrphanedSessions,
     seedWorkspaceActiveSessionFromMembers,
@@ -1342,6 +1425,8 @@ export function useAIState() {
     addMessageToSession,
     updateLastMessage,
     updateMessageById,
+    truncateSessionFromMessage,
+    forkSessionFromMessage,
     persistContextCompaction,
     cleanupOrphanedSessions,
     seedWorkspaceActiveSessionFromMembers,

@@ -9,7 +9,11 @@
 import { AlertCircle, BookOpen, FileText, RotateCcw, SquareTerminal, X, ZoomIn, ZoomOut } from 'lucide-react';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useI18n } from '../../application/i18n/I18nProvider';
-import type { ChatMessage, ToolCall as AgentToolCall } from '../../infrastructure/ai/types';
+import type {
+  AISessionContextCompaction,
+  ChatMessage,
+  ToolCall as AgentToolCall,
+} from '../../infrastructure/ai/types';
 import { Dialog, DialogContent, DialogTitle } from '../ui/dialog';
 import {
   Conversation,
@@ -70,10 +74,20 @@ import {
   resolveCapabilityId,
 } from '../../infrastructure/ai/harness/permissionGrants';
 import {
-  compactionStatusText,
   resolveCompactionStatusText,
   type ActiveCompactionUi,
 } from '../../application/state/useAgentCompactionUi';
+import {
+  resolveChatMessageActions,
+  type ChatMessageActionId,
+} from '../../domain/chatMessageActions';
+import MessageActionBar from './MessageActionBar';
+import {
+  CompactionBoundaryNotice,
+  CompactionResultChip,
+  CompactionStatusChip,
+  type CompactionResultUi,
+} from './CompactionNotice';
 import {
   getAIPanelDiagnosticHiddenParts,
   getAIPanelProfilerProps,
@@ -92,6 +106,18 @@ interface ChatMessageListProps {
   /** Active chat session ID — used to filter standalone MCP approval blocks */
   activeSessionId?: string | null;
   activeCompaction?: ActiveCompactionUi | null;
+  /** Presentation-only result of the most recent compaction in this session. */
+  compactionResult?: CompactionResultUi | null;
+  /** Persisted summary standing in for the compacted prefix of the session. */
+  contextCompaction?: AISessionContextCompaction | null;
+  /** The agent can start a turn, so edit/resend/branch are actionable. */
+  canRunMessageActions?: boolean;
+  /** Message currently being edited in the composer. */
+  editingMessageId?: string | null;
+  onCopyMessage?: (message: ChatMessage) => void;
+  onEditMessage?: (message: ChatMessage) => void;
+  onResendMessage?: (message: ChatMessage) => void;
+  onBranchMessage?: (message: ChatMessage) => void;
   notes?: VaultNote[];
   hosts?: Host[];
   snippets?: Snippet[];
@@ -180,6 +206,14 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
   isStreaming,
   activeSessionId,
   activeCompaction = null,
+  compactionResult = null,
+  contextCompaction = null,
+  canRunMessageActions = false,
+  editingMessageId = null,
+  onCopyMessage,
+  onEditMessage,
+  onResendMessage,
+  onBranchMessage,
   notes = [],
   hosts = [],
   snippets = [],
@@ -489,6 +523,27 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
     && activeSessionId
     && activeCompaction.sessionId === activeSessionId,
   );
+  const showCompactionResult = Boolean(
+    compactionResult
+    && activeSessionId
+    && compactionResult.sessionId === activeSessionId,
+  );
+
+  const resolveActionsForMessage = (message: ChatMessage): ChatMessageActionId[] => {
+    const available = resolveChatMessageActions(message, {
+      isStreaming: !!isStreaming,
+      canRunTurn: canRunMessageActions,
+    });
+    return available.filter((action) => {
+      switch (action) {
+        case 'copy': return Boolean(onCopyMessage);
+        case 'edit': return Boolean(onEditMessage);
+        case 'resend': return Boolean(onResendMessage);
+        case 'branch': return Boolean(onBranchMessage);
+        default: return false;
+      }
+    });
+  };
 
   const renderPendingToolCallCards = (
     toolCall: AgentToolCall,
@@ -553,6 +608,9 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
     <>
     <Conversation className="flex-1">
       <ConversationContent className="gap-1.5 px-4 py-2">
+        {contextCompaction && (
+          <CompactionBoundaryNotice compaction={contextCompaction} />
+        )}
         {hiddenMessageCount > 0 && (
           <button
             type="button"
@@ -799,6 +857,21 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
                   </div>
                 )}
               </MessageContent>
+              {(() => {
+                const actions = resolveActionsForMessage(message);
+                if (actions.length === 0) return null;
+                return (
+                  <MessageActionBar
+                    actions={actions}
+                    align={isUser ? 'end' : 'start'}
+                    isEditing={editingMessageId === message.id}
+                    onCopy={() => onCopyMessage?.(message)}
+                    onEdit={() => onEditMessage?.(message)}
+                    onResend={() => onResendMessage?.(message)}
+                    onBranch={() => onBranchMessage?.(message)}
+                  />
+                );
+              })()}
             </Message>
           );
         })}
@@ -903,11 +976,10 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
           ))}
         {/* Transient compaction status — inline, no banner */}
         {showCompactionStatus && activeCompaction && (
-          <div className="py-1">
-            <span className="thinking-shimmer text-xs text-muted-foreground">
-              {compactionStatusText(activeCompaction.trigger, t)}
-            </span>
-          </div>
+          <CompactionStatusChip compaction={activeCompaction} />
+        )}
+        {showCompactionResult && compactionResult && (
+          <CompactionResultChip result={compactionResult} />
         )}
 
         {/* Streaming indicator — only when no content and no thinking yet */}
@@ -1034,6 +1106,15 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
 function areMessagesEqual(prev: ChatMessageListProps, next: ChatMessageListProps): boolean {
   if (prev.isStreaming !== next.isStreaming) return false;
   if (prev.activeSessionId !== next.activeSessionId) return false;
+  if (prev.activeCompaction !== next.activeCompaction) return false;
+  if (prev.compactionResult !== next.compactionResult) return false;
+  if (prev.contextCompaction !== next.contextCompaction) return false;
+  if (prev.canRunMessageActions !== next.canRunMessageActions) return false;
+  if (prev.editingMessageId !== next.editingMessageId) return false;
+  if (prev.onCopyMessage !== next.onCopyMessage) return false;
+  if (prev.onEditMessage !== next.onEditMessage) return false;
+  if (prev.onResendMessage !== next.onResendMessage) return false;
+  if (prev.onBranchMessage !== next.onBranchMessage) return false;
   if (prev.notes !== next.notes) return false;
   if (prev.hosts !== next.hosts) return false;
   if (prev.snippets !== next.snippets) return false;

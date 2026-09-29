@@ -585,3 +585,118 @@ test("Codex approval render plan preserves every approval for the same item", ()
     ["approval-3"],
   );
 });
+
+function renderMessageList(props: Record<string, unknown>): string {
+  return renderToStaticMarkup(
+    React.createElement(
+      I18nProvider,
+      { locale: "en" },
+      React.createElement(
+        TooltipProvider,
+        null,
+        React.createElement(ChatMessageList, props),
+      ),
+    ),
+  );
+}
+
+test("ChatMessageList exposes copy, edit, resend and branch on settled messages", () => {
+  const messages: ChatMessage[] = [
+    { id: "u1", role: "user", content: "hello", timestamp: 1 },
+    { id: "a1", role: "assistant", content: "hi", timestamp: 2 },
+  ];
+
+  const markup = renderMessageList({
+    messages,
+    canRunMessageActions: true,
+    onCopyMessage: () => {},
+    onEditMessage: () => {},
+    onResendMessage: () => {},
+    onBranchMessage: () => {},
+  });
+
+  assert.match(markup, /data-ai-message-actions=""/);
+  for (const action of ["copy", "edit", "resend", "branch"]) {
+    assert.match(markup, new RegExp(`data-ai-message-action="${action}"`));
+  }
+  assert.match(markup, /aria-label="Edit message"/);
+});
+
+test("no message actions render without handlers", () => {
+  const messages: ChatMessage[] = [{ id: "u1", role: "user", content: "hello", timestamp: 1 }];
+  const markup = renderMessageList({ messages, canRunMessageActions: true });
+  assert.doesNotMatch(markup, /data-ai-message-actions/);
+});
+
+test("editing a message marks its edit action as active", () => {
+  const messages: ChatMessage[] = [{ id: "u1", role: "user", content: "hello", timestamp: 1 }];
+  const markup = renderMessageList({
+    messages,
+    canRunMessageActions: true,
+    editingMessageId: "u1",
+    onEditMessage: () => {},
+  });
+  assert.match(markup, /data-ai-message-action="edit"/);
+  assert.match(markup, /bg-primary\/\[0\.10\]/);
+});
+
+test("ChatMessageList renders the persisted compaction boundary", () => {
+  const messages: ChatMessage[] = [{ id: "u1", role: "user", content: "hello", timestamp: 1 }];
+  const markup = renderMessageList({
+    messages,
+    contextCompaction: {
+      summary: "summary body",
+      compactedMessageCount: 7,
+    },
+  });
+
+  assert.match(markup, /data-ai-compaction-boundary=""/);
+  assert.match(markup, /7 earlier messages compacted into a summary/);
+  // The summary stays collapsed until the row is expanded.
+  assert.doesNotMatch(markup, /summary body/);
+});
+
+test("ChatMessageList renders the last compaction result for the active session", () => {
+  const messages: ChatMessage[] = [{ id: "u1", role: "user", content: "hello", timestamp: 1 }];
+  const markup = renderMessageList({
+    messages,
+    activeSessionId: "chat-1",
+    compactionResult: {
+      sessionId: "chat-1",
+      trigger: "pre-turn",
+      tokensBefore: 128_000,
+      tokensAfter: 41_000,
+      messagesBefore: 42,
+      messagesAfter: 10,
+      didLlmSummarize: true,
+      didTypedCompression: false,
+      did413Fallback: false,
+    },
+  });
+
+  assert.match(markup, /data-ai-compaction-result=""/);
+  assert.match(markup, /Context compacted: 128K → 41K tokens/);
+});
+
+test("compaction status and result chips ignore another session", () => {
+  const messages: ChatMessage[] = [{ id: "u1", role: "user", content: "hello", timestamp: 1 }];
+  const markup = renderMessageList({
+    messages,
+    activeSessionId: "chat-1",
+    compactionResult: {
+      sessionId: "chat-2",
+      trigger: "pre-turn",
+      tokensBefore: 1_000,
+      tokensAfter: 500,
+      messagesBefore: 4,
+      messagesAfter: 2,
+      didLlmSummarize: false,
+      didTypedCompression: true,
+      did413Fallback: false,
+    },
+    activeCompaction: { sessionId: "chat-2", trigger: "pre-turn" },
+  });
+
+  assert.doesNotMatch(markup, /data-ai-compaction-result/);
+  assert.doesNotMatch(markup, /data-ai-compaction-status/);
+});

@@ -50,6 +50,14 @@ export interface AIChatSidePanelProps {
     messageId: string,
     updater: (msg: ChatMessage) => ChatMessage,
   ) => void;
+  /** Drop `messageId` and everything after it, so the turn can be re-run. */
+  truncateSessionFromMessage: (sessionId: string, messageId: string) => number;
+  /** Fork the conversation at `messageId` into a new session in the same scope. */
+  forkSessionFromMessage: (
+    sessionId: string,
+    messageId: string,
+    options?: { title?: string },
+  ) => AISession | null;
   persistContextCompaction: (
     sessionId: string,
     compaction: import('../infrastructure/ai/types').AISessionContextCompaction,
