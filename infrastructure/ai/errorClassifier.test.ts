@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { classifyError, isRequestTooLargeError, sanitizeErrorMessage } from "./errorClassifier.ts";
+import { classifyError, classifyStreamAbort, isRequestTooLargeError, sanitizeErrorMessage } from "./errorClassifier.ts";
 
 // -------------------------------------------------------------------
 // sanitizeErrorMessage — regression guard for pre-existing behavior
@@ -156,4 +156,29 @@ test("classifyError handles null, undefined, and non-Error shapes without throwi
   assert.doesNotThrow(() => classifyError(undefined));
   assert.doesNotThrow(() => classifyError({ foo: "bar" }));
   assert.doesNotThrow(() => classifyError(42));
+});
+
+// -------------------------------------------------------------------
+// classifyStreamAbort — SDK deadline aborts
+// -------------------------------------------------------------------
+
+test("classifyStreamAbort explains a chunk deadline in seconds", () => {
+  const info = classifyStreamAbort("TimeoutError: Chunk timeout of 150000ms exceeded");
+  assert.equal(info.type, "timeout");
+  assert.equal(info.retryable, true);
+  assert.match(info.message, /cancelled after 150s/);
+  assert.match(info.message, /Raw: TimeoutError: Chunk timeout of 150000ms exceeded/);
+});
+
+test("classifyStreamAbort still reports an unknown abort reason", () => {
+  const info = classifyStreamAbort(undefined);
+  assert.equal(info.type, "unknown");
+  assert.equal(info.retryable, true);
+  assert.match(info.message, /cancelled/i);
+});
+
+test("classifyError routes SDK deadline errors through classifyStreamAbort", () => {
+  const info = classifyError(new DOMException("Step timeout of 600000ms exceeded", "TimeoutError"));
+  assert.equal(info.type, "timeout");
+  assert.match(info.message, /cancelled after 600s/);
 });

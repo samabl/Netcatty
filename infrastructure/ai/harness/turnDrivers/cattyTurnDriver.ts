@@ -23,6 +23,7 @@ import {
 } from '../../cattyReasoning';
 import { createModelFromConfig } from '../../sdk/providers';
 import { createCattyToolsBundle } from '../capabilityTools';
+import { buildCattyStreamTimeouts } from '../streamTimeouts';
 import { fetchExternalMcpTools } from '../../mcp/externalMcpBridge';
 import { summarizeExternalMcpServers } from '../externalMcpTools';
 import { createInitialCattyRuntimeContext } from '../cattyRuntimeContext';
@@ -163,6 +164,27 @@ async function runCattyTurn(input: CattyTurnInput, ctx: TurnDriverContext): Prom
   // External MCP tools are optional: an unreachable third-party server must
   // degrade to "no extra tools", never fail the turn.
   const externalMcpTools = await fetchExternalMcpTools(netcattyBridge);
+  const responseIdleTimeoutSeconds = normalizeResponseIdleTimeoutSeconds(
+    context.responseIdleTimeout ?? Number.NaN,
+  );
+  const responseIdleTimeoutMs = responseIdleTimeoutSeconds * 1000;
+  const commandTimeoutSeconds =
+    Number.isFinite(context.commandTimeout) && context.commandTimeout > 0
+      ? normalizeCommandTimeoutSeconds(context.commandTimeout)
+      : undefined;
+  const commandTimeoutMs =
+    commandTimeoutSeconds != null
+      ? commandTimeoutSeconds * 1000
+      : undefined;
+  // Tools must heartbeat while they block: the SDK's chunk deadline keeps
+  // running during tool execution, so a slow script would otherwise cancel the
+  // whole turn without any error.
+  const { toolHeartbeatMs } = buildCattyStreamTimeouts({
+    permissionMode: context.permissionMode ?? context.globalPermissionMode,
+    commandTimeoutMs,
+    responseIdleTimeoutMs,
+    maxIterations,
+  });
   const toolsBundle = createCattyToolsBundle(
     netcattyBridge,
     getExecutorContext,
@@ -173,6 +195,7 @@ async function runCattyTurn(input: CattyTurnInput, ctx: TurnDriverContext): Prom
     ctx.toolOutputStore,
     ctx.toolResultDedup,
     externalMcpTools,
+    { toolHeartbeatMs },
   );
   const { tools } = toolsBundle;
 
@@ -239,11 +262,6 @@ async function runCattyTurn(input: CattyTurnInput, ctx: TurnDriverContext): Prom
       toolOutputStore: ctx.toolOutputStore,
       fieldsByMessage: openAIChatAssistantFieldsByMessage,
     });
-
-    const responseIdleTimeoutSeconds = normalizeResponseIdleTimeoutSeconds(
-      context.responseIdleTimeout ?? Number.NaN,
-    );
-    const responseIdleTimeoutMs = responseIdleTimeoutSeconds * 1000;
 
     let model;
     try {
@@ -446,14 +464,6 @@ async function runCattyTurn(input: CattyTurnInput, ctx: TurnDriverContext): Prom
       userGoal: extractLatestUserGoal(messagesForStream),
       promptContext,
     });
-    const commandTimeoutSeconds =
-      Number.isFinite(context.commandTimeout) && context.commandTimeout > 0
-        ? normalizeCommandTimeoutSeconds(context.commandTimeout)
-        : undefined;
-    const commandTimeoutMs =
-      commandTimeoutSeconds != null
-        ? commandTimeoutSeconds * 1000
-        : undefined;
 
     const runStream = async (streamMessages: ModelMessage[], streamAssistantMsgId: string) => {
       await processCattyStream({

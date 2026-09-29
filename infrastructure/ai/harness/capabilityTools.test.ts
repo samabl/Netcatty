@@ -9,6 +9,37 @@ import { ToolOutputStore } from './toolOutputStore';
 import { buildTerminalWriteFingerprint, ToolResultDedup } from './toolResultDedup';
 import { collectPreservedTerminalWriteFingerprints } from './turnDrivers/cattyMessageBuilder';
 
+describe('capabilityTools heartbeat context', () => {
+  const emptyBridge = {} as unknown as Parameters<typeof createCattyToolsFromCatalog>[0];
+
+  it('shares the configured heartbeat interval with every catalog tool', () => {
+    const { tools, toolsContext } = createCattyToolsFromCatalog(
+      emptyBridge,
+      { sessions: [] },
+      [],
+      'auto',
+      undefined,
+      'chat-1',
+      undefined,
+      undefined,
+      { toolHeartbeatMs: 12_345 },
+    );
+
+    assert.ok(Object.keys(tools).length > 0);
+    for (const context of Object.values(toolsContext)) {
+      assert.equal(context.toolHeartbeatMs, 12_345);
+    }
+  });
+
+  it('leaves the heartbeat unset when the caller does not configure one', () => {
+    const { toolsContext } = createCattyToolsFromCatalog(emptyBridge, { sessions: [] }, [], 'auto');
+
+    for (const context of Object.values(toolsContext)) {
+      assert.equal(context.toolHeartbeatMs, undefined);
+    }
+  });
+});
+
 describe('capabilityTools session queue keys', () => {
   it('does not queue read-only harness tools behind terminal session writes', () => {
     const key = resolveSessionQueueKeyForTests(

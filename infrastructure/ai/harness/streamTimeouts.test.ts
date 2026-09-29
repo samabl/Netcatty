@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildCattyStreamTimeouts } from './streamTimeouts';
+import { buildCattyStreamTimeouts, resolveCattyToolHeartbeatMs } from './streamTimeouts';
 import { CATTY_APPROVAL_HARD_DEADLINE_MS } from '../shared/approvalConstants';
 import {
   DEFAULT_RESPONSE_IDLE_TIMEOUT_SECONDS,
@@ -107,5 +107,44 @@ describe('buildCattyStreamTimeouts', () => {
     assert.ok(timeouts.chunkMs > 86_400 * 1000);
     assert.ok(timeouts.toolMs > 86_400 * 1000);
     assert.ok(timeouts.stepMs > 86_400 * 1000);
+  });
+
+  it('never lets the step budget cut a tool earlier than its own tool budget', () => {
+    const autoModeDefaults = buildCattyStreamTimeouts({
+      permissionMode: 'auto',
+      commandTimeoutMs: 60 * 1000,
+      responseIdleTimeoutMs: 120 * 1000,
+    });
+    const confirmModeDefaults = buildCattyStreamTimeouts({
+      permissionMode: 'confirm',
+      commandTimeoutMs: 60 * 1000,
+      responseIdleTimeoutMs: 120 * 1000,
+    });
+
+    assert.ok(autoModeDefaults.stepMs > autoModeDefaults.toolMs);
+    assert.ok(confirmModeDefaults.stepMs > confirmModeDefaults.toolMs);
+  });
+
+  it('derives a chunk-safe heartbeat interval so blocked tools keep the stream alive', () => {
+    const timeouts = buildCattyStreamTimeouts({
+      commandTimeoutMs: 60 * 1000,
+      responseIdleTimeoutMs: 120 * 1000,
+    });
+
+    assert.equal(timeouts.chunkMs, 150 * 1000);
+    assert.equal(timeouts.toolHeartbeatMs, 30 * 1000);
+    assert.ok(
+      timeouts.toolHeartbeatMs * 3 <= timeouts.chunkMs,
+      'heartbeats must land well inside the chunk idle window',
+    );
+  });
+
+  it('bounds the heartbeat interval for tiny and huge chunk budgets', () => {
+    assert.equal(resolveCattyToolHeartbeatMs(0), 30 * 1000);
+    assert.equal(resolveCattyToolHeartbeatMs(Number.NaN), 30 * 1000);
+    assert.equal(resolveCattyToolHeartbeatMs(120 * 1000), 30 * 1000);
+    assert.equal(resolveCattyToolHeartbeatMs(30 * 1000), 10 * 1000);
+    assert.equal(resolveCattyToolHeartbeatMs(3 * 1000), 5 * 1000);
+    assert.equal(resolveCattyToolHeartbeatMs(60 * 60 * 1000), 30 * 1000);
   });
 });

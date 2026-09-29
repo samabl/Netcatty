@@ -34,6 +34,8 @@ export const cattyToolContextSchema = z.object({
   getExecutorContext: z.custom<() => ExecutorContext>(),
   toolOutputStore: z.custom<ToolOutputStore>().optional(),
   toolResultDedup: z.custom<ToolResultDedup>().optional(),
+  /** Preliminary-result interval that keeps a blocked tool inside the chunk idle window. */
+  toolHeartbeatMs: z.number().optional(),
 });
 
 export type CattyToolContext = z.infer<typeof cattyToolContextSchema>;

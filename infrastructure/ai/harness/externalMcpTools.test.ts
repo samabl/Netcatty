@@ -10,6 +10,7 @@ import {
   summarizeExternalMcpServers,
 } from './externalMcpTools.ts';
 import type { CattyToolsBundle } from './capabilityTools.ts';
+import { resolveToolExecuteResult } from './capabilityTools.ts';
 import type { CattyToolContext } from './cattyRuntimeContext.ts';
 import type { ExternalMcpToolDescriptor } from '../mcp/externalMcpTypes.ts';
 
@@ -49,7 +50,8 @@ function descriptor(overrides: Partial<ExternalMcpToolDescriptor> = {}): Externa
 /**
  * AI SDK v7 types Tool generically, which the shared withCattyToolContext
  * helper (typed for the concrete catalog tools) cannot express. Invoke the
- * runtime execute through an explicit options shape instead.
+ * runtime execute through an explicit options shape instead, draining the
+ * heartbeat generator the way the SDK does.
  */
 async function callTool(
   bundle: CattyToolsBundle,
@@ -58,10 +60,13 @@ async function callTool(
   args: Record<string, unknown>,
 ): Promise<ToolResult> {
   const built = bundle.tools[toolName] as unknown as {
-    execute?: (input: Record<string, unknown>, options: Record<string, unknown>) => Promise<ToolResult>;
+    execute?: (input: Record<string, unknown>, options: Record<string, unknown>) => unknown;
   };
   assert.ok(built.execute, toolName + ' should expose execute');
-  return built.execute(args, { toolCallId: 'call-1', messages: [], context });
+  const result = await resolveToolExecuteResult(
+    built.execute(args, { toolCallId: 'call-1', messages: [], context }),
+  );
+  return result as ToolResult;
 }
 
 test('buildExternalMcpTools namespaces tool names and tags the description', () => {

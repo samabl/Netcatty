@@ -25,6 +25,7 @@ export interface CattyStreamChunk {
   args?: unknown;
   output?: unknown;
   result?: unknown;
+  preliminary?: boolean;
   error?: unknown;
   approved?: boolean;
   stepNumber?: number;
@@ -208,6 +209,8 @@ export function mapCattyStreamChunkToAgentEvents(
   }
 
   if (chunk.type === 'tool-result' && chunk.toolCallId) {
+    // Preliminary results are tool progress heartbeats, not recorded activity.
+    if (chunk.preliminary) return [];
     const output = chunk.output ?? chunk.result;
     const resultText = typeof output === 'string' ? output : JSON.stringify(output ?? '');
     return [{

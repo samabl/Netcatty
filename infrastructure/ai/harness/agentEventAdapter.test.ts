@@ -69,6 +69,37 @@ describe('agentEventAdapter', () => {
     assert.equal(isStepHandleNoticeMessage('regular user message'), false);
   });
 
+  it('keeps preliminary tool-result heartbeats out of the trace', () => {
+    const events = mapCattyStreamChunkToAgentEvents(
+      {
+        type: 'tool-result',
+        toolCallId: 'call-slow',
+        toolName: 'scripts_run',
+        output: { status: 'running', tool: 'scripts_run', elapsedMs: 30_000 },
+        preliminary: true,
+      },
+      { sessionId: 'chat-1', turnId: 'turn-1' },
+    );
+
+    assert.deepEqual(events, []);
+  });
+
+  it('still maps the final tool-result that follows the heartbeats', () => {
+    const events = mapCattyStreamChunkToAgentEvents(
+      {
+        type: 'tool-result',
+        toolCallId: 'call-slow',
+        toolName: 'scripts_run',
+        output: { ok: true, result: 'script finished' },
+      },
+      { sessionId: 'chat-1', turnId: 'turn-1' },
+    );
+
+    assert.equal(events.length, 1);
+    assert.equal(events[0]?.type, 'tool_result');
+    assert.match(String((events[0] as { result?: string }).result), /script finished/);
+  });
+
   it('maps SDK activity events into the unified trace protocol', () => {
     const context = { sessionId: 'chat-1', turnId: 'turn-1' };
     const fileChange = mapSdkStreamEventToAgentEvents({

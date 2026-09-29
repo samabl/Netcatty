@@ -5,6 +5,7 @@ import { normalizeExternalMcpInputSchema } from '../../../domain/mcp/externalMcp
 import { assignExternalMcpToolNames } from '../../../domain/mcp/externalMcpToolName';
 import { cattyToolContextSchema, type CattyToolContext } from './cattyRuntimeContext';
 import { fitLargeToolResultForModel } from './toolResultFitting';
+import { runWithToolHeartbeat } from './toolHeartbeat';
 import type { CattyToolPolicy, CattyToolsBundle } from './capabilityTools';
 
 /** Label used for tool-output handles produced by third-party MCP calls. */
@@ -89,27 +90,38 @@ export function buildExternalMcpTools(
         normalizeExternalMcpInputSchema(descriptor.inputSchema),
       ),
       contextSchema: cattyToolContextSchema,
-      execute: async (args, options) => {
+      // Third-party servers can take arbitrarily long; heartbeat preliminaries
+      // keep the SDK's chunk idle deadline from cancelling the turn meanwhile.
+      execute: async function* (args, options) {
         const context = options.context as CattyToolContext | undefined;
-        if (options.abortSignal?.aborted) {
-          return { error: 'Tool call cancelled before it could start.' };
-        }
-        const client = getExternalMcpClientBridge(context?.bridge ?? null);
-        if (!client?.mcpClientCallTool) {
-          return { error: 'External MCP client is unavailable in this environment.' };
-        }
-        const result = await client.mcpClientCallTool(
-          descriptor.serverId,
-          descriptor.toolName,
-          (args ?? {}) as Record<string, unknown>,
+        yield* runWithToolHeartbeat(
+          async () => {
+            if (options.abortSignal?.aborted) {
+              return { error: 'Tool call cancelled before it could start.' };
+            }
+            const client = getExternalMcpClientBridge(context?.bridge ?? null);
+            if (!client?.mcpClientCallTool) {
+              return { error: 'External MCP client is unavailable in this environment.' };
+            }
+            const result = await client.mcpClientCallTool(
+              descriptor.serverId,
+              descriptor.toolName,
+              (args ?? {}) as Record<string, unknown>,
+            );
+            return fitLargeToolResultForModel({
+              result: normalizeExternalMcpCallResult(result),
+              capabilityId: EXTERNAL_MCP_CAPABILITY_ID,
+              chatSessionId: context?.chatSessionId,
+              toolOutputStore: context?.toolOutputStore,
+              normalizeStrings: true,
+            });
+          },
+          {
+            toolName: qualifiedName,
+            heartbeatMs: context?.toolHeartbeatMs,
+            abortSignal: options.abortSignal,
+          },
         );
-        return fitLargeToolResultForModel({
-          result: normalizeExternalMcpCallResult(result),
-          capabilityId: EXTERNAL_MCP_CAPABILITY_ID,
-          chatSessionId: context?.chatSessionId,
-          toolOutputStore: context?.toolOutputStore,
-          normalizeStrings: true,
-        });
       },
     }) as unknown as CattyToolsBundle['tools'][string];
     toolsContext[qualifiedName] = sharedContext;

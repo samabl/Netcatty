@@ -1,5 +1,5 @@
 import { streamText, isStepCount, type ModelMessage } from 'ai';
-import { classifyError } from '../../errorClassifier';
+import { classifyError, classifyStreamAbort } from '../../errorClassifier';
 import { isRequestTooLargeError } from '../../errorClassifier';
 import { isSdkStreamStateError } from '../../shared/streamStateErrors';
 import {
@@ -28,6 +28,7 @@ import {
   isToolResultError,
   resolveStreamChunkToolCallId,
   type CattyProviderContinuationContext,
+  type AbortChunk,
   type ErrorChunk,
   type RawChunk,
   type ReasoningChunk,
@@ -238,6 +239,9 @@ export async function processCattyStream(input: ProcessCattyStreamInput): Promis
 
   let pendingText = '';
   let rafId: number | null = null;
+  // Set when the SDK emits its terminal `abort` part: the run was cancelled by
+  // the SDK itself (chunk/step/total deadline) or by the caller's signal.
+  let streamAborted = false;
 
   const clearCompactionStatusFromAssistant = (messageId: string) => {
     ui.updateMessageById(streamSessionId, messageId, msg =>
@@ -490,6 +494,12 @@ export async function processCattyStream(input: ProcessCattyStreamInput): Promis
         }
         case 'tool-result': {
           const typedChunk = chunk as ToolResultChunk;
+          // Preliminary outputs are progress heartbeats from long-running tools
+          // (see runWithToolHeartbeat). The SDK already excludes them from the
+          // model's step outputs; they must not reach the transcript either.
+          if (typedChunk.preliminary) {
+            break;
+          }
           const toolOutput = typedChunk.output ?? typedChunk.result;
           appendToolResultToUi(
             typedChunk.toolCallId,
@@ -542,6 +552,45 @@ export async function processCattyStream(input: ProcessCattyStreamInput): Promis
           });
           break;
         }
+        case 'abort': {
+          const typedChunk = chunk as AbortChunk;
+          const alreadyAborted = streamAborted;
+          streamAborted = true;
+          // A user stop aborts the same stream and already ends the turn as
+          // 'aborted'; only the SDK's own deadline aborts are silent killers, so
+          // report those — once — instead of letting the turn vanish untraced.
+          if (alreadyAborted || signal.aborted) {
+            break;
+          }
+          cancelPendingFlush();
+          flushText();
+          const errorInfo = classifyStreamAbort(typedChunk.reason);
+          ui.updateMessageById(streamSessionId, activeMsgId, msg => ({
+            ...msg,
+            statusText: '',
+            executionStatus: msg.executionStatus === 'running' ? 'failed' : msg.executionStatus,
+          }));
+          ui.addMessageToSession(streamSessionId, {
+            id: generateId(),
+            role: 'assistant',
+            content: '',
+            errorInfo,
+            timestamp: Date.now(),
+          });
+          onAgentEvent?.({
+            id: `stream-abort-${turnId ?? Date.now()}`,
+            type: 'error',
+            sessionId: streamSessionId,
+            chatSessionId: runtimeContext.chatSessionId,
+            backend: 'catty',
+            timestamp: Date.now(),
+            turnId,
+            message: errorInfo.message,
+            code: 'stream_aborted',
+            recoverable: true,
+          } as AgentEvent);
+          break;
+        }
         default:
           break;
       }
@@ -552,8 +601,20 @@ export async function processCattyStream(input: ProcessCattyStreamInput): Promis
     reader.releaseLock();
   }
 
-  const usage = await result.usage;
-  const finalStep = await result.finalStep;
+  // An aborted run settles these with the very same deadline error we already
+  // reported above. Swallowing the duplicate keeps one cancelled turn to one
+  // error bubble instead of letting the driver raise a second, raw one.
+  const settleAfterAbort = async <T>(promise: PromiseLike<T>): Promise<T | undefined> => {
+    try {
+      return await promise;
+    } catch (error) {
+      if (streamAborted) return undefined;
+      throw error;
+    }
+  };
+
+  const usage = await settleAfterAbort(result.usage);
+  const finalStep = await settleAfterAbort(result.finalStep);
   const performance = finalStep?.performance;
 
   if (performance) {

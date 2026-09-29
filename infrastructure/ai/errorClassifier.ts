@@ -128,6 +128,12 @@ function looksLikeZodParseError(message: string): boolean {
  */
 export function classifyError(error: unknown): ErrorInfo {
   const rawMessage = extractMessage(error).trim() || 'Unknown error';
+  // The AI SDK raises its own deadlines as `TimeoutError` DOMExceptions. They
+  // mean the same thing as an `abort` stream part, so report them the same way
+  // instead of dumping raw SDK text into the chat.
+  if (STREAM_DEADLINE_RE.test(rawMessage)) {
+    return classifyStreamAbort(error);
+  }
   const statusCode = extractStatusCode(error, rawMessage);
   const responseBody = extractResponseBody(error);
 
@@ -188,8 +194,43 @@ export function classifyError(error: unknown): ErrorInfo {
   return { type: 'unknown', message: sanitizedRaw, retryable: false };
 }
 
-const MAX_ERROR_MESSAGE_LENGTH = 500;
+// The SDK reports its deadlines as `TimeoutError: Chunk timeout of 150000ms
+// exceeded` (error name prefixed), so the match is not anchored.
+const STREAM_DEADLINE_RE = /\b(chunk|step|total) timeout of (\d+)ms exceeded/i;
 
+/**
+ * Classify the `reason` the AI SDK attaches to its terminal `abort` stream part.
+ *
+ * The SDK cancels the whole run when one of its deadlines expires; until this
+ * was surfaced, such a turn ended with no message, no result and a
+ * `turn_end.reason` of `completed`, which reads exactly like a normal finish.
+ */
+export function classifyStreamAbort(reason: unknown): ErrorInfo {
+  const raw = extractMessage(reason).trim();
+  const deadline = raw.match(STREAM_DEADLINE_RE);
+  if (deadline) {
+    const seconds = Math.max(1, Math.round(Number(deadline[2]) / 1000));
+    return {
+      type: 'timeout',
+      message:
+        `The AI request was cancelled after ${seconds}s without new stream data ` +
+        `(${deadline[1]?.toLowerCase()} deadline). A tool call — for example a long script or ` +
+        `transfer — blocked the stream for longer than the current wait window. Any work already ` +
+        `started may still be running in that session; check the terminal or script runs, then ` +
+        `continue in a new turn (shorter waits or background runs avoid the window).\n\n` +
+        `Raw: ${sanitizeErrorMessage(raw)}`,
+      retryable: true,
+    };
+  }
+
+  return {
+    type: 'unknown',
+    message: `The AI request was cancelled: ${sanitizeErrorMessage(raw || 'no reason reported')}`,
+    retryable: true,
+  };
+}
+
+const MAX_ERROR_MESSAGE_LENGTH = 500;
 /**
  * Sanitize an error message before displaying it to the user.
  * Strips file paths, URLs with credentials, and truncates long messages.

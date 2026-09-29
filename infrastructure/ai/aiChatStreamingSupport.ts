@@ -42,8 +42,15 @@ export interface ToolCallChunk {
 export interface ToolResultChunk {
   type: 'tool-result';
   toolCallId: string;
+  toolName?: string;
   output?: unknown;
   result?: unknown;
+  /**
+   * Progress heartbeat emitted by a still-running tool. Preliminary results
+   * never reach the model or the transcript; they only keep the SDK stream
+   * (and its chunk idle deadline) alive while a tool blocks.
+   */
+  preliminary?: boolean;
 }
 
 /** Shape of a tool-error chunk from the Vercel AI SDK stream. */
@@ -130,6 +137,16 @@ export interface ErrorChunk {
   error: unknown;
 }
 
+/**
+ * Terminal chunk the SDK emits when it aborted the stream itself (chunk/step/
+ * total deadline) or when the caller's abort signal fired. `reason` carries the
+ * deadline message for self-aborts.
+ */
+export interface AbortChunk {
+  type: 'abort';
+  reason?: unknown;
+}
+
 /** Union of all stream chunk shapes we handle. */
 export type StreamChunk =
   | TextDeltaChunk
@@ -140,6 +157,7 @@ export type StreamChunk =
   | ToolOutputDeniedChunk
   | ToolApprovalResponseChunk
   | ErrorChunk
+  | AbortChunk
   | RawChunk
   | { type: 'reasoning-end' | 'text-start' | 'text-end' | 'start' | 'finish' | 'start-step' | 'finish-step' | 'tool-approval-request'; approvalId?: string; toolCallId?: string; toolName?: string; approved?: boolean; toolCall?: StreamChunkToolCallRef; input?: unknown; args?: unknown; providerMetadata?: unknown };
 

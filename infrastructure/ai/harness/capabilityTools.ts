@@ -34,6 +34,7 @@ import {
 import cattyToolSpecs from './generated/cattyToolSpecs.json';
 import type { ExternalMcpToolDescriptor } from '../mcp/externalMcpTypes';
 import { buildExternalMcpTools, mergeCattyToolBundles } from './externalMcpTools';
+import { runWithToolHeartbeat } from './toolHeartbeat';
 import {
   cattyToolContextSchema,
   toolDepsFromContext,
@@ -403,11 +404,10 @@ export function resolveSessionQueueKeyForTests(
 function createCatalogTool(spec: CattyToolSpec) {
   const inputSchema = buildZodObject(spec.inputShape);
 
-  return tool({
-    description: spec.description,
-    inputSchema,
-    contextSchema: cattyToolContextSchema,
-    execute: async (args, { toolCallId: _toolCallId, abortSignal, context }) => {
+  const runCatalogTool = async (
+    args: Record<string, unknown>,
+    { abortSignal, context }: { abortSignal?: AbortSignal; context?: unknown },
+  ): Promise<unknown> => {
       const toolContext = context as CattyToolContext;
       const deps = toolDepsFromContext(toolContext);
       const { toolOutputStore, toolResultDedup } = toolContext;
@@ -713,6 +713,24 @@ function createCatalogTool(spec: CattyToolSpec) {
       } finally {
         slot?.release();
       }
+  };
+
+  return tool({
+    description: spec.description,
+    inputSchema,
+    contextSchema: cattyToolContextSchema,
+    // Tool execution blocks the SDK stream, whose chunk idle deadline keeps
+    // running while no stream part is produced. Heartbeats re-arm it so a slow
+    // script/transfer cannot cancel the turn while it is still making progress.
+    execute: async function* (args, { abortSignal, context }) {
+      yield* runWithToolHeartbeat(
+        () => runCatalogTool(args as Record<string, unknown>, { abortSignal, context }),
+        {
+          toolName: spec.toolName,
+          heartbeatMs: (context as CattyToolContext | undefined)?.toolHeartbeatMs,
+          abortSignal,
+        },
+      );
     },
   });
 }
@@ -726,6 +744,7 @@ export function buildCattyToolContext(input: {
   chatSessionId?: string;
   toolOutputStore?: ToolOutputStore;
   toolResultDedup?: ToolResultDedup;
+  toolHeartbeatMs?: number;
 }): CattyToolContext {
   return {
     bridge: input.bridge,
@@ -738,6 +757,7 @@ export function buildCattyToolContext(input: {
       : () => input.context as ExecutorContext,
     toolOutputStore: input.toolOutputStore,
     toolResultDedup: input.toolResultDedup,
+    toolHeartbeatMs: input.toolHeartbeatMs,
   };
 }
 
@@ -750,6 +770,7 @@ export function createCattyToolsFromCatalog(
   chatSessionId?: string,
   toolOutputStore?: ToolOutputStore,
   toolResultDedup?: ToolResultDedup,
+  options: { toolHeartbeatMs?: number } = {},
 ): CattyToolsBundle {
   const sharedContext = buildCattyToolContext({
     bridge,
@@ -760,6 +781,7 @@ export function createCattyToolsFromCatalog(
     chatSessionId,
     toolOutputStore,
     toolResultDedup,
+    toolHeartbeatMs: options.toolHeartbeatMs,
   });
 
   const catalogTools: Record<string, ReturnType<typeof tool>> = {};
@@ -791,6 +813,7 @@ export function createCattyToolsBundle(
   toolOutputStore?: ToolOutputStore,
   toolResultDedup?: ToolResultDedup,
   externalTools?: readonly ExternalMcpToolDescriptor[],
+  options: { toolHeartbeatMs?: number } = {},
 ): CattyToolsBundle {
   const catalogBundle = createCattyToolsFromCatalog(
     bridge,
@@ -801,6 +824,7 @@ export function createCattyToolsBundle(
     chatSessionId,
     toolOutputStore,
     toolResultDedup,
+    options,
   );
   if (!externalTools?.length) return catalogBundle;
   const sharedContext = Object.values(catalogBundle.toolsContext)[0];
@@ -809,6 +833,22 @@ export function createCattyToolsBundle(
     catalogBundle,
     buildExternalMcpTools(externalTools, sharedContext),
   );
+}
+
+/**
+ * Tool execution may be an async generator (see `runWithToolHeartbeat`); the AI
+ * SDK consumes the last yielded value as the tool output, so direct callers must
+ * do the same instead of receiving the generator object.
+ */
+export async function resolveToolExecuteResult(value: unknown): Promise<unknown> {
+  if (!value || typeof (value as AsyncIterable<unknown>)[Symbol.asyncIterator] !== 'function') {
+    return value;
+  }
+  let last: unknown;
+  for await (const item of value as AsyncIterable<unknown>) {
+    last = item;
+  }
+  return last;
 }
 
 /** Test helper: attach shared context when calling tool.execute directly. */
@@ -821,12 +861,12 @@ export function withCattyToolContext<T extends { execute: (...args: never[]) => 
   return {
     ...toolInstance,
     execute: (input: Parameters<T['execute']>[0], options?: Partial<Parameters<T['execute']>[1]>) =>
-      original(input, {
+      resolveToolExecuteResult(original(input, {
         toolCallId,
         messages: [],
         ...options,
         context,
-      } as Parameters<T['execute']>[1]),
+      } as Parameters<T['execute']>[1])),
   } as T;
 }
 
