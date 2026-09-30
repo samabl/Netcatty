@@ -18,6 +18,7 @@ const {
   buildPendingInputClearPrefix,
   pendingInputClearSettleMs,
   buildWrappedCommand,
+  PS_WRAPPER_MAX_LINE_CHARS,
 } = require("./ptyExecHelpers.cjs");
 const {
   getFreshIdlePrompt,
@@ -41,12 +42,18 @@ function markerFromWrite(data) {
 
 /**
  * PowerShell sessions receive the pending-input clear as its own keystroke, so
- * the wrapper lands in a later write. Wait for the write that carries `marker`.
+ * the wrapper lands in a later write. That write types the wrapper as short
+ * statements, which can split the full marker across chunk boundaries — match
+ * the job's accumulator name instead.
  */
 async function waitForMarkerWrite(writes, marker, timeoutMs = 2000) {
+  const tag = /^__NCMCP_([A-Za-z0-9]+)_/.exec(marker)?.[1];
+  const accumulator = tag ? `__NCMCP_${tag}+=` : null;
   const deadline = Date.now() + timeoutMs;
   for (;;) {
-    const match = writes.find((write) => write.includes(marker));
+    const match = writes.find((write) => (
+      write.includes(marker) || (accumulator && write.includes(accumulator))
+    ));
     if (match) return match;
     if (Date.now() > deadline) assert.fail(`timed out waiting for a pty write carrying ${marker}`);
     await new Promise((resolve) => setTimeout(resolve, 10));
@@ -932,6 +939,55 @@ test("startPtyJob clears PowerShell input in Windows, Emacs, and Vi editor state
       assert.doesNotMatch(submittedLine, /cmd \/d \/s \/c/i);
     }
   }
+});
+
+test("PowerShell wrapper is typed as short statements that cannot wrap", () => {
+  const marker = "__NCMCP_mwrap001_deadbeefdeadbeefdeadbeefdeadbeef__";
+  const command = `Write-Output "first";\n"${"y".repeat(240)}"; $x = '${"'".repeat(12)}'; Get-ChildItem 'C:\\Program Files'`;
+  const wrapped = buildWrappedCommand(command, "powershell", marker);
+  const lines = wrapped.split("\r").filter(Boolean);
+
+  // A single >1 KB line made the line editor wrap it, dropping row prefixes and
+  // rendering ">> " continuation rows; see buildPowerShellWrapperLines.
+  assert.ok(lines.length > 4, `expected several statements, got ${lines.length}`);
+  const tag = /^__NCMCP_([A-Za-z0-9]+)_/.exec(marker)[1];
+  const accumulator = `$__NCMCP_${tag}`;
+  for (const line of lines) {
+    assert.ok(
+      line.length <= PS_WRAPPER_MAX_LINE_CHARS,
+      `statement exceeds the line budget (${line.length}): ${line}`,
+    );
+    assert.doesNotMatch(line, /[\r\n]/, "a statement must never contain a raw newline");
+    assert.ok(
+      line.includes("__NCMCP_") || line.startsWith("Invoke-Expression"),
+      `statement must carry the marker for the echo filter: ${line}`,
+    );
+  }
+  assert.equal(lines.at(-1), `Invoke-Expression ${accumulator}`);
+
+  // Replay the accumulation the way the shell does: the reconstructed text must
+  // contain the original command exactly (including escaped quotes/newlines).
+  let accumulated = "";
+  for (const line of lines.slice(0, -1)) {
+    if (line === `${accumulator}=''`) continue; // strict-mode-safe initialiser
+    const assignment = new RegExp(`^\\${accumulator}\\+=(.*)$`).exec(line);
+    assert.ok(assignment, `unexpected statement: ${line}`);
+    const expression = assignment[1];
+    const newline = /^\[char\](13|10)(?:\+\[char\](13|10))?$/.exec(expression);
+    if (newline) {
+      accumulated += String.fromCharCode(Number(newline[1]));
+      if (newline[2]) accumulated += String.fromCharCode(Number(newline[2]));
+      continue;
+    }
+    assert.match(expression, /^'.*'$/s, `statement must append a quoted literal: ${line}`);
+    accumulated += expression.slice(1, -1).replace(/''/g, "'");
+  }
+  assert.ok(
+    accumulated.includes(command.replace(/'/g, "''")),
+    "the accumulated wrapper must reproduce the command text exactly",
+  );
+  assert.ok(accumulated.includes(`${marker}_S`), "start marker must survive chunking");
+  assert.ok(accumulated.includes(`${marker}_E:$`), "end marker must survive chunking");
 });
 
 test("startPtyJob keeps the clear prefix for non-PowerShell sessions", async () => {

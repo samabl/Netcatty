@@ -1831,6 +1831,42 @@ test("primed suppression hides BusyBox ash echo wrapped mid-marker (#3384)", () 
 });
 
 
+test("primed suppression hides the chunked PowerShell wrapper and keeps its output", () => {
+  const preload = loadPreloadWithFakeElectron();
+  try {
+    const received = [];
+    const sessionId = "powershell-chunked-wrapper";
+    const marker = "__NCMCP_mchunk01_ccbc892e865a115a80c88afdc77b96a6__";
+    const { buildWrappedCommand } = require("./bridges/ai/ptyExecHelpers.cjs");
+    preload.api.onSessionData(sessionId, (chunk) => received.push(chunk));
+    // Primed over the data channel before the wrapper is typed, mirroring
+    // onEchoSuppressionPrime in ptyExec.cjs.
+    preload.handlers.get("netcatty:data")({}, { sessionId, data: `${marker}_I\n` });
+
+    const command = `Write-Output "visible-output"; ${"x".repeat(400)}`;
+    const statements = buildWrappedCommand(command, "powershell", marker)
+      .split("\r")
+      .filter(Boolean);
+    // The wrapper used to be one >1 KB line; the line editor then wrapped it,
+    // dropped row prefixes and rendered ">> " rows, so the echoed wrapper leaked
+    // and the command output went missing (see buildPowerShellWrapperLines).
+    assert.ok(statements.length > 3, "the PowerShell wrapper must be typed as short statements");
+
+    // Each statement is echoed on its own row after the prompt, then the shell
+    // prints a bare prompt for the next one.
+    const echo = statements.map((statement) => `PS C:\\Users\\alice> ${statement}\r\n`).join("")
+      + "PS C:\\Users\\alice> \r\n";
+    const data = `${echo}${marker}_S\r\nvisible-output\r\n${marker}_E:0\r\n`;
+    for (let offset = 0; offset < data.length; offset += 7) {
+      preload.handlers.get("netcatty:data")({}, { sessionId, data: data.slice(offset, offset + 7) });
+    }
+    assert.equal(received.join(""), "visible-output\r\n");
+  } finally {
+    preload.cleanup();
+  }
+});
+
+
 test("ordinary text resembling an OpenWrt continuation is released", async () => {
   const preload = loadPreloadWithFakeElectron();
   try {

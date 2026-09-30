@@ -210,14 +210,98 @@ function buildPendingInputClearPrefix(shellKind) {
 
 // Milliseconds to wait after writing the clear prefix before typing the
 // wrapper. PowerShell's clear is an edit-mode keystroke, not text: written in
-// the same chunk as the wrapper, the line editor consumes the wrapper as part
-// of the same key sequence and the command never runs (measured on the same
-// pwsh 7.6 / PSReadLine 2.4.5 pair). The readline-style shells above kill text
-// instead, so they keep the single-write form.
+// the same chunk as the wrapper, the line editor consumes the command as part
+// of the same key sequence and the job hangs until its startup timeout
+// (measured on pwsh 7.6 / PSReadLine 2.4.5). The readline-style shells above
+// kill text instead, so they keep the single-write form.
 const POWERSHELL_CLEAR_SETTLE_MS = 120;
 
 function pendingInputClearSettleMs(shellKind) {
   return shellKind === "powershell" ? POWERSHELL_CLEAR_SETTLE_MS : 0;
+}
+
+// Longest physical input line the PowerShell wrapper may type. Real terminals
+// can be narrower than this, but every line here is a complete statement, so
+// even a narrower pane only costs an extra row — never a line-editor
+// continuation.
+const PS_WRAPPER_MAX_LINE_CHARS = 72;
+
+/**
+ * Split text into code-point-safe pieces whose single-quoted PowerShell escape
+ * fits the statement budget. Iterating a string yields whole code points, so a
+ * surrogate pair never lands on a chunk boundary; quoting cost is charged per
+ * character because `'` doubles.
+ */
+function splitPowerShellChunks(text, budget) {
+  const chunks = [];
+  let current = "";
+  let used = 0;
+  for (const ch of String(text ?? "")) {
+    const cost = ch === "'" ? 2 : ch.length;
+    if (current && used + cost > budget) {
+      chunks.push(current);
+      current = "";
+      used = 0;
+    }
+    current += ch;
+    used += cost;
+  }
+  if (current) chunks.push(current);
+  return chunks;
+}
+
+function powerShellNewlineSnippet(separator) {
+  if (separator === "\r\n") return "[char]13+[char]10";
+  if (separator === "\r") return "[char]13";
+  return "[char]10";
+}
+
+/**
+ * Build the PowerShell wrapper as several SHORT physical lines instead of one
+ * enormous one.
+ *
+ * Measured on pwsh 7.6 / PSReadLine 2.4.5 (default Windows edit mode): typing a
+ * >1 KB wrapper as a single line makes the line editor wrap it across rows,
+ * after which the terminal receives rows whose leading characters were eaten
+ * (`>> CMCP_...` where `__NCMCP_...` was expected), a `>> ` continuation row,
+ * and prompts interleaved into the command output — the agent's command output
+ * ended up missing from the display while the exec protocol still worked.
+ *
+ * Every line below stays under PS_WRAPPER_MAX_LINE_CHARS and is a COMPLETE
+ * statement, so the line editor never enters a continuation state (no `>> `
+ * rows at all). Each line also carries the marker, so the renderer's echo
+ * filter drops it even if the probe window is not armed. The accumulated text
+ * is the unchanged single-line wrapper, executed once by Invoke-Expression, so
+ * the `_S`/`_E:<rc>` protocol is untouched.
+ */
+function buildPowerShellWrapperLines(wrapperText, marker) {
+  const tag = (/^__NCMCP_([A-Za-z0-9]+)_/.exec(String(marker || "")) || [])[1] || "job";
+  // Job-scoped accumulator: unique per job, and its name keeps `__NCMCP_` in
+  // every typed line for the echo filter.
+  const acc = `$__NCMCP_${tag}`;
+  const statementBudget = Math.max(
+    8,
+    PS_WRAPPER_MAX_LINE_CHARS - `${acc}+=''`.length,
+  );
+  // Initialise first: `+=` on an unset variable is an error under
+  // Set-StrictMode, and profiles do set it.
+  const statements = [`${acc}=''`];
+  // Odd indices of a split with a capturing group are the separators.
+  const parts = String(wrapperText ?? "").split(/(\r\n|\n|\r)/);
+  for (let index = 0; index < parts.length; index += 1) {
+    if (index % 2 === 1) {
+      statements.push(`${acc}+=${powerShellNewlineSnippet(parts[index])}`);
+      continue;
+    }
+    for (const chunk of splitPowerShellChunks(parts[index], statementBudget)) {
+      statements.push(`${acc}+='${escapePowerShellSingleQuoted(chunk)}'`);
+    }
+  }
+  statements.push(`Invoke-Expression ${acc}`);
+  // CR only: a LF after Enter leaves PSReadLine in a continuation state, which
+  // renders a ">> " row for every statement (measured on the same pair). Enter
+  // is CR, and the wrapper text's own newlines travel as [char] snippets.
+  return `${statements.join("\r")}\r`;
 }
 
 function bashHistoryScratchNames(marker) {
@@ -302,8 +386,11 @@ function buildWrappedCommand(command, shellKind, marker, separateStartMarker = f
     case "powershell": {
       const psPager = "$env:PAGER='cat'; $env:SYSTEMD_PAGER=''; $env:GIT_PAGER='cat'; $env:LESS=''; ";
       const psEscaped = escapePowerShellSingleQuoted(command);
-      return (
-        `$${marker}=0; $${marker}_cmd='${psEscaped}'; & { Write-Output '${marker}_S'; ${psPager}$LASTEXITCODE=$null; try { Invoke-Expression $${marker}_cmd; $${marker}_rc = if ($LASTEXITCODE -ne $null) { $LASTEXITCODE } elseif ($?) { 0 } else { 1 } } catch { $${marker}_rc = 1 }; Write-Output "${marker}_E:$${marker}_rc" }\r\n`
+      // Typed as short statements, not one >1 KB line: see
+      // buildPowerShellWrapperLines for the measured rendering failure.
+      return buildPowerShellWrapperLines(
+        `$${marker}=0; $${marker}_cmd='${psEscaped}'; & { Write-Output '${marker}_S'; ${psPager}$LASTEXITCODE=$null; try { Invoke-Expression $${marker}_cmd; $${marker}_rc = if ($LASTEXITCODE -ne $null) { $LASTEXITCODE } elseif ($?) { 0 } else { 1 } } catch { $${marker}_rc = 1 }; Write-Output "${marker}_E:$${marker}_rc" }`,
+        marker,
       );
     }
 
@@ -541,6 +628,8 @@ module.exports = {
   buildPendingInputClearPrefix,
   pendingInputClearSettleMs,
   POWERSHELL_CLEAR_SETTLE_MS,
+  PS_WRAPPER_MAX_LINE_CHARS,
+  buildPowerShellWrapperLines,
   buildWrappedCommand,
   buildBashHistoryCleanup,
   bashHistoryScratchNames,
