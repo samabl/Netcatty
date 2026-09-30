@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const { EventEmitter } = require('node:events');
 const { startPtyJob } = require('./ptyExec.cjs');
 const { buildLiveShellProbe } = require('./liveShellProbe.cjs');
-const { buildWrappedCommand } = require('./ptyExecHelpers.cjs');
+const { buildWrappedCommand, POWERSHELL_CLEAR_SETTLE_MS } = require('./ptyExecHelpers.cjs');
 
 for (const background of [true, false]) {
   test(`paced ${background ? 'background' : 'silent foreground'} delivery does not consume startup time`, async (t) => {
@@ -113,10 +113,18 @@ for (const shellKind of ['powershell', 'cmd']) {
     const job = startPtyJob(pty, `echo ${'x'.repeat(12000)}`, {
       shellKind, bastionKeystrokes: true, timeoutMs: 500,
     });
-    assert.equal(writes.length, 128);
+    // PowerShell sends the pending-input clear as its own keystroke and settles
+    // before the wrapper is paced out; cmd keeps the fused single write.
+    const clearWrites = shellKind === 'powershell' ? 1 : 0;
+    if (clearWrites) {
+      assert.equal(writes.length, 1);
+      assert.equal(writes[0], '\x03');
+      t.mock.timers.tick(POWERSHELL_CLEAR_SETTLE_MS);
+    }
+    assert.equal(writes.length, clearWrites + 128);
     t.mock.timers.tick(30);
-    assert.equal(writes.length, 256);
-    assert.ok(writes.every((value) => Array.from(value).length === 1));
+    assert.equal(writes.length, clearWrites + 256);
+    assert.ok(writes.slice(clearWrites).every((value) => Array.from(value).length === 1));
     job.cancel();
     const count = writes.length;
     t.mock.timers.tick(30);

@@ -19,6 +19,7 @@ const {
   hasExpectedPromptSuffix,
   resolveEffectiveShellKind,
   buildPendingInputClearPrefix,
+  pendingInputClearSettleMs,
   buildWrappedCommand,
   findEndMarker,
   normalizePtyOutput,
@@ -749,10 +750,13 @@ function startPtyJob(ptyStream, command, options) {
   let inputWriteTimer = null;
   let inputDrainListener = null;
   let inputWriteGeneration = 0;
+  let clearSettleTimer = null;
   function stopInputWrite() {
     inputWriteGeneration += 1;
     clearTimeout(inputWriteTimer);
     inputWriteTimer = null;
+    clearTimeout(clearSettleTimer);
+    clearSettleTimer = null;
     if (inputDrainListener) ptyStream.removeListener("drain", inputDrainListener);
     inputDrainListener = null;
   }
@@ -820,9 +824,50 @@ function startPtyJob(ptyStream, command, options) {
     writeNext();
   }
 
+  /**
+   * Deliver the pending-input clear keystroke without arming the input-delivery
+   * deadlines, so the settle window below cannot consume the job's startup or
+   * first-output budget.
+   */
+  function writeClearKeystroke(prefix) {
+    stopInputWrite();
+    clearStartupTimeout();
+    clearTimeout(timeoutId);
+    deliveringInput = true;
+    ptyStream.write(prefix);
+  }
+
+  /**
+   * Write the pending-input clear, then the text.
+   *
+   * PowerShell's clear is an edit-mode keystroke rather than text, so writing it
+   * fused with the wrapper makes the line editor swallow the wrapper as part of
+   * the same key sequence (measured on pwsh 7.6 / PSReadLine 2.4.5): the command
+   * never reaches the shell and the job hangs until its startup timeout. Give
+   * the keystroke its own write and let it settle before typing the text.
+   * Readline-style shells kill text instead, so they keep the single write.
+   */
+  function writeInputWithClear(text) {
+    const prefix = buildPendingInputClearPrefix(resolvedShellKind);
+    const settleMs = pendingInputClearSettleMs(resolvedShellKind);
+    if (!prefix || !(settleMs > 0)) {
+      writeInput(`${prefix}${text}`);
+      return;
+    }
+
+    writeClearKeystroke(prefix);
+    const generation = inputWriteGeneration;
+    clearTimeout(clearSettleTimer);
+    clearSettleTimer = setTimeout(() => {
+      clearSettleTimer = null;
+      if (finished || cancelRequested || generation !== inputWriteGeneration) return;
+      writeInput(text);
+    }, settleMs);
+  }
+
   function writeWrappedCommand() {
     const wrapped = buildWrappedCommand(command, resolvedShellKind, marker, probeLiveShell);
-    writeInput(`${buildPendingInputClearPrefix(resolvedShellKind)}${wrapped}`);
+    writeInputWithClear(wrapped);
   }
 
   // Prime the renderer's display suppression before the first byte is typed
@@ -841,7 +886,7 @@ function startPtyJob(ptyStream, command, options) {
     }
   }
   if (probingShell) {
-    writeInput(`${buildPendingInputClearPrefix(resolvedShellKind)}${buildLiveShellProbe(marker)}`);
+    writeInputWithClear(buildLiveShellProbe(marker));
   } else {
     writeWrappedCommand();
   }

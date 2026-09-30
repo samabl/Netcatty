@@ -16,6 +16,7 @@ const {
 } = require("./ptyExec.cjs");
 const {
   buildPendingInputClearPrefix,
+  pendingInputClearSettleMs,
   buildWrappedCommand,
 } = require("./ptyExecHelpers.cjs");
 const {
@@ -36,6 +37,20 @@ class ShellBackedPty extends EventEmitter {
 
 function markerFromWrite(data) {
   return String(data).match(/(__NCMCP_[a-z0-9]+_[0-9a-f]+__)/i)?.[1] || null;
+}
+
+/**
+ * PowerShell sessions receive the pending-input clear as its own keystroke, so
+ * the wrapper lands in a later write. Wait for the write that carries `marker`.
+ */
+async function waitForMarkerWrite(writes, marker, timeoutMs = 2000) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const match = writes.find((write) => write.includes(marker));
+    if (match) return match;
+    if (Date.now() > deadline) assert.fail(`timed out waiting for a pty write carrying ${marker}`);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
 }
 
 test("execViaPty completes when command output has no trailing newline", async () => {
@@ -367,9 +382,21 @@ test("loginShellHint selects fish/posix/powershell/cmd without pinning confirmed
 test("pending-input clear prefix covers interactive shells and skips raw devices", () => {
   assert.equal(buildPendingInputClearPrefix("posix"), "\x0b\x15");
   assert.equal(buildPendingInputClearPrefix("fish"), "\x0b\x15");
-  assert.equal(buildPendingInputClearPrefix("powershell"), "\x1bggd2147483647d\x1br\x1b\x1bi\x08");
+  // Ctrl+C is the only PowerShell binding that clears the line in every
+  // PSReadLine edit mode; the previous Escape/vi hybrid silently failed in the
+  // default Windows edit mode and inserted its leftover bytes as literals.
+  assert.equal(buildPendingInputClearPrefix("powershell"), "\x03");
   assert.equal(buildPendingInputClearPrefix("cmd"), "\x1b");
   assert.equal(buildPendingInputClearPrefix("raw"), "");
+});
+
+test("only PowerShell needs the clear keystroke delivered on its own", () => {
+  // The clear is an edit-mode keystroke there: fused with the wrapper the line
+  // editor consumes the wrapper as part of the same key sequence.
+  assert.ok(pendingInputClearSettleMs("powershell") > 0);
+  assert.equal(pendingInputClearSettleMs("posix"), 0);
+  assert.equal(pendingInputClearSettleMs("cmd"), 0);
+  assert.equal(pendingInputClearSettleMs("raw"), 0);
 });
 
 test("consecutive jobs wait for the PowerShell prompt after a split end marker", async () => {
@@ -391,7 +418,10 @@ test("consecutive jobs wait for the PowerShell prompt after a split end marker",
       timeoutMs: 20,
       expectedPrompt: getFreshIdlePrompt(session),
     });
-    const write = writes.at(-1);
+    // PowerShell clears any pending input on its own keystroke first, then types
+    // the wrapper once that keystroke has settled.
+    assert.equal(writes[0], "\x03");
+    const write = await waitForMarkerWrite(writes, job.marker);
     assert.match(write, /\$__NCMCP_/);
     assert.doesNotMatch(write, /cmd \/d \/s \/c/i);
 
@@ -446,11 +476,14 @@ test("cancel retries stop after an end marker while the prompt is delayed", asyn
     expectedPrompt: "PS C:\\Users\\alice>",
   });
   job.cancel();
-  assert.equal(writes.filter((write) => write === "\x03").length, 1);
+  // The pending-input clear is Ctrl+C as well, so interrupts are counted as
+  // writes beyond the leading clear.
+  const clears = 1;
+  assert.equal(writes.filter((write) => write === "\x03").length, clears + 1);
 
   pty.emit("data", Buffer.from(`${job.marker}_S\r\n${job.marker}_E:130\r\n`));
   await new Promise((resolve) => setTimeout(resolve, 200));
-  assert.equal(writes.filter((write) => write === "\x03").length, 1);
+  assert.equal(writes.filter((write) => write === "\x03").length, clears + 1);
 
   pty.emit("data", Buffer.from("PS C:\\Users\\alice>"));
   const result = await job.resultPromise;
@@ -487,7 +520,8 @@ test("cancelled output strips an end marker delivered with the prompt", async ()
   assert.equal(result.stdout, "");
   assert.doesNotMatch(result.stdout, /__NCMCP_/);
   await new Promise((resolve) => setTimeout(resolve, 200));
-  assert.equal(writes.filter((write) => write === "\x03").length, 1);
+  // One leading pending-input clear plus the single cancel interrupt.
+  assert.equal(writes.filter((write) => write === "\x03").length, 2);
 });
 
 test("cancel after an end marker keeps waiting without interrupting the prompt", async () => {
@@ -511,7 +545,9 @@ test("cancel after an end marker keeps waiting without interrupting the prompt",
   job.resultPromise.then(() => { settled = true; });
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(settled, false);
-  assert.equal(writes.filter((write) => write === "\x03").length, 0);
+  // Only the leading pending-input clear, never an interrupt for the prompt.
+  assert.equal(writes.filter((write) => write === "\x03").length, 1);
+  assert.equal(writes[0], "\x03");
 
   pty.emit("data", Buffer.from("PS C:\\Users\\alice>"));
   const result = await job.resultPromise;
@@ -586,7 +622,11 @@ test("a foreground wall deadline returns on time but blocks writes until the pro
   assert.equal(firstResult.ok, true);
   assert.equal(firstResult.exitCode, 0);
   assert.equal(firstResult.stdout, "DONE");
-  assert.equal(writes.filter((write) => write === "\x03").length, 0);
+  // The leading pending-input clear is the only Ctrl+C this job sends. The job
+  // finished on the end marker, so its settled wrapper write is never sent.
+  assert.equal(writes[0], "\x03");
+  assert.equal(writes.filter((write) => write === "\x03").length, 1);
+  const writesAfterFirstJob = writes.length;
 
   assert.throws(
     () => startPtyJob(pty, "Write-Output 'TOO_EARLY'", {
@@ -600,7 +640,7 @@ test("a foreground wall deadline returns on time but blocks writes until the pro
       && /waiting for the shell prompt/i.test(error.message)
     ),
   );
-  assert.equal(writes.length, 1);
+  assert.equal(writes.length, writesAfterFirstJob);
 
   pty.emit("data", Buffer.from("PS C:\\Users\\alice>"));
   const second = startPtyJob(pty, "Write-Output 'NEXT'", {
@@ -609,7 +649,7 @@ test("a foreground wall deadline returns on time but blocks writes until the pro
     timeoutMs: 1000,
     expectedPrompt: getFreshIdlePrompt(session),
   });
-  const secondWrite = writes.at(-1);
+  const secondWrite = await waitForMarkerWrite(writes, second.marker);
   assert.match(secondWrite, /\$__NCMCP_/);
   assert.doesNotMatch(secondWrite, /cmd \/d \/s \/c/i);
   pty.emit(
@@ -619,7 +659,8 @@ test("a foreground wall deadline returns on time but blocks writes until the pro
   const secondResult = await second.resultPromise;
   assert.equal(secondResult.ok, true);
   assert.equal(secondResult.stdout, "NEXT");
-  assert.equal(writes.filter((write) => write === "\x03").length, 0);
+  // One pending-input clear per job, and no interrupt for either command.
+  assert.equal(writes.filter((write) => write === "\x03").length, 2);
 });
 
 test("startPtyJob clears PowerShell input in Windows, Emacs, and Vi editor states", async () => {
@@ -635,6 +676,7 @@ test("startPtyJob clears PowerShell input in Windows, Emacs, and Vi editor state
       this.viChord = "";
       this.viChordDigits = "";
       this.emacsChord = false;
+      this.windowsChord = false;
       this.submittedLines = [];
       this.writes = [];
     }
@@ -646,6 +688,20 @@ test("startPtyJob clears PowerShell input in Windows, Emacs, and Vi editor state
       this.viReplacePending = false;
       this.viChord = "";
       this.viChordDigits = "";
+      this.windowsChord = false;
+    }
+
+    /**
+     * A write boundary is what lets PSReadLine treat a lone Escape as
+     * RevertLine instead of a chord prefix.
+     */
+    settle() {
+      if (this.editMode === "windows" && this.windowsChord) {
+        this.windowsChord = false;
+        this.pendingInput = "";
+        this.cursor = 0;
+      }
+      if (this.editMode === "emacs") this.emacsChord = false;
     }
 
     insert(text) {
@@ -655,9 +711,19 @@ test("startPtyJob clears PowerShell input in Windows, Emacs, and Vi editor state
 
     applyEditKey(key) {
       if (this.editMode === "windows") {
-        if (key === "\x1b") {
+        if (key === "\x03") {
+          // Ctrl+C abandons the pending line (PSReadLine echoes "^C").
           this.pendingInput = "";
           this.cursor = 0;
+          this.windowsChord = false;
+        } else if (this.windowsChord) {
+          // Escape followed within the same keystroke burst is read as a chord
+          // prefix and the next character is inserted literally (measured on
+          // PSReadLine 2.4.5: "\x1br" inserted "r" and kept the pending text).
+          this.windowsChord = false;
+          this.insert(key);
+        } else if (key === "\x1b") {
+          this.windowsChord = true;
         } else if (key === "\x08") {
           if (this.cursor > 0) {
             this.pendingInput = `${this.pendingInput.slice(0, this.cursor - 1)}${this.pendingInput.slice(this.cursor)}`;
@@ -670,7 +736,11 @@ test("startPtyJob clears PowerShell input in Windows, Emacs, and Vi editor state
       }
 
       if (this.editMode === "emacs") {
-        if (this.emacsChord) {
+        if (key === "\x03") {
+          this.pendingInput = "";
+          this.cursor = 0;
+          this.emacsChord = false;
+        } else if (this.emacsChord) {
           this.emacsChord = false;
           if (key.toLowerCase() === "r") {
             this.pendingInput = "";
@@ -691,6 +761,17 @@ test("startPtyJob clears PowerShell input in Windows, Emacs, and Vi editor state
         } else {
           this.insert(key);
         }
+        return;
+      }
+
+      if (key === "\x03") {
+        // Ctrl+C abandons the pending line in Vi mode as well.
+        this.pendingInput = "";
+        this.cursor = 0;
+        this.viInsertMode = true;
+        this.viReplacePending = false;
+        this.viChord = "";
+        this.viChordDigits = "";
         return;
       }
 
@@ -763,9 +844,15 @@ test("startPtyJob clears PowerShell input in Windows, Emacs, and Vi editor state
       this.writes.push(text);
 
       const clearPrefix = buildPendingInputClearPrefix("powershell");
-      assert.ok(text.startsWith(clearPrefix));
-      for (const key of clearPrefix) this.applyEditKey(key);
-      const wrapper = text.slice(clearPrefix.length);
+      if (text === clearPrefix) {
+        // PowerShell's clear is delivered as its own keystroke, then settles
+        // before the wrapper is typed.
+        for (const key of clearPrefix) this.applyEditKey(key);
+        this.settle();
+        return;
+      }
+
+      const wrapper = text;
       const submittedLine = this.viInsertMode
         ? `${this.pendingInput.slice(0, this.cursor)}${wrapper}${this.pendingInput.slice(this.cursor)}`
         : this.pendingInput;
@@ -780,6 +867,15 @@ test("startPtyJob clears PowerShell input in Windows, Emacs, and Vi editor state
       });
     }
   }
+
+  // Regression guard for the shipped Escape/vi hybrid: written in one burst it
+  // does NOT clear a Windows-mode line. The leftover bytes are inserted as
+  // literals, which is what put "#2962"-style concatenation back on the screen.
+  const legacyHybridPty = new PowerShellLinePty("windows");
+  legacyHybridPty.setPendingInput("; Write-Output 'USER_SECOND'");
+  for (const key of "\x1bggd2147483647d\x1br\x1b\x1bi\x08") legacyHybridPty.applyEditKey(key);
+  legacyHybridPty.settle();
+  assert.match(legacyHybridPty.pendingInput, /USER_SECOND/);
 
   const legacyPreviousPrefixPty = new PowerShellLinePty("vi", { legacyVi: true });
   legacyPreviousPrefixPty.setPendingInput("first line\n; Write-Output 'USER_SECOND'");
@@ -823,10 +919,13 @@ test("startPtyJob clears PowerShell input in Windows, Emacs, and Vi editor state
       await job.resultPromise;
     }
 
-    assert.equal(pty.writes.length, 2);
+    // Each command costs two writes: the clear keystroke, then the wrapper.
+    assert.equal(pty.writes.length, 4);
     assert.equal(pty.submittedLines.length, 2);
-    for (const [index, submittedLine] of pty.submittedLines.entries()) {
-      assert.ok(pty.writes[index].startsWith("\x1bggd2147483647d\x1br\x1b\x1bi\x08$__NCMCP_"));
+    for (let index = 0; index < pty.submittedLines.length; index += 1) {
+      assert.equal(pty.writes[index * 2], "\x03");
+      assert.ok(pty.writes[index * 2 + 1].startsWith("$__NCMCP_"));
+      const submittedLine = pty.submittedLines[index];
       assert.ok(submittedLine.startsWith("$__NCMCP_"));
       assert.doesNotMatch(submittedLine, /Write-Output 'USER'/);
       assert.doesNotMatch(submittedLine, /Write-Output 'USER_SECOND'/);

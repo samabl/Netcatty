@@ -188,16 +188,36 @@ function buildPendingInputClearPrefix(shellKind) {
     case "cmd":
       return "\x1b";
     case "powershell":
-      // Vi gg plus a counted dd removes the whole multiline buffer, including
-      // in PSReadLine 2.0 where dG is unavailable. Escape+r is Emacs
-      // RevertLine. Repeated Escape clears Windows mode, and the final
-      // i+Backspace leaves every mode on an empty editable line.
-      return "\x1bggd2147483647d\x1br\x1b\x1bi\x08";
+      // Ctrl+C ("abandon the current line") is the only PowerShell binding that
+      // holds in every PSReadLine edit mode. The previous Escape/vi hybrid
+      // ("\x1bggd2147483647d\x1br\x1b\x1bi\x08") only cleared Emacs mode:
+      // measured against pwsh 7.6 / PSReadLine 2.4.5 in the default Windows
+      // edit mode it left the pending line untouched and inserted the
+      // remaining bytes as literals, so the wrapper was still concatenated
+      // onto typed-but-not-entered text. Escape alone, Ctrl+A Ctrl+K, Ctrl+K,
+      // Ctrl+U and Escape+Ctrl+U each fail in one or more of the Windows,
+      // Emacs and Vi modes, and Ctrl+A/Ctrl+K leak a literal "^K".
+      // On an already empty prompt this is a silent no-op, so it costs nothing
+      // on the common path. It must still be delivered as its own keystroke —
+      // see pendingInputClearSettleMs below.
+      return "\x03";
     default:
       // Kill the suffix before the prefix. Canonical/no-editing terminals do
       // not bind Ctrl+K; the trailing Ctrl+U must erase that literal byte too.
       return "\x0b\x15";
   }
+}
+
+// Milliseconds to wait after writing the clear prefix before typing the
+// wrapper. PowerShell's clear is an edit-mode keystroke, not text: written in
+// the same chunk as the wrapper, the line editor consumes the wrapper as part
+// of the same key sequence and the command never runs (measured on the same
+// pwsh 7.6 / PSReadLine 2.4.5 pair). The readline-style shells above kill text
+// instead, so they keep the single-write form.
+const POWERSHELL_CLEAR_SETTLE_MS = 120;
+
+function pendingInputClearSettleMs(shellKind) {
+  return shellKind === "powershell" ? POWERSHELL_CLEAR_SETTLE_MS : 0;
 }
 
 function bashHistoryScratchNames(marker) {
@@ -519,6 +539,8 @@ module.exports = {
   hasExpectedPromptSuffix,
   resolveEffectiveShellKind,
   buildPendingInputClearPrefix,
+  pendingInputClearSettleMs,
+  POWERSHELL_CLEAR_SETTLE_MS,
   buildWrappedCommand,
   buildBashHistoryCleanup,
   bashHistoryScratchNames,
