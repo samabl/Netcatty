@@ -78,6 +78,19 @@ function nextTick() {
   return new Promise((resolve) => setImmediate(resolve));
 }
 
+/**
+ * PowerShell sessions receive the pending-input clear as its own keystroke, so
+ * the wrapped command reaches the PTY one settle window after the job starts.
+ */
+async function waitForPtyWrite(writes, predicate, message, timeoutMs = 5000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (writes.some(predicate)) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.fail(message);
+}
+
 test("worker job stop receives cancellation output while renderer flow is paused", async () => {
   class PausablePty extends Duplex {
     constructor() { super(); this.writes = []; }
@@ -452,9 +465,9 @@ test("worker exec keeps shell-selected defaults: powershell frees $(), dangerous
     chatSessionId: "chat-ps",
     commandTimeoutMs: 300,
   });
-  await nextTick();
-  assert.ok(
-    pty.writes.some((entry) => entry.includes("__NCMCP_") && !entry.includes("command sh -c")),
+  await waitForPtyWrite(
+    pty.writes,
+    (entry) => entry.includes("__NCMCP_") && !entry.includes("command sh -c"),
     "expected the unblocked command to reach the PTY",
   );
   await allowedPromise.catch(() => {});
