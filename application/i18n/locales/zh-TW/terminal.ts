@@ -385,7 +385,7 @@ export const zhTWTerminalMessages: Messages = {
   'settings.terminal.behavior.scrollOnInput': '輸入時自動捲動',
   'settings.terminal.behavior.scrollOnInput.desc': '輸入時將終端捲動到底部',
   'settings.terminal.behavior.scrollOnOutput': '輸出時自動捲動',
-  'settings.terminal.behavior.scrollOnOutput.desc': '有新輸出時將終端捲動到底部',
+  'settings.terminal.behavior.scrollOnOutput.desc': '在底部跟隨新輸出，向上查看歷史時不會被打斷',
   'settings.terminal.behavior.scrollOnKeyPress': '按鍵時自動捲動',
   'settings.terminal.behavior.scrollOnKeyPress.desc': '按鍵（例如 Enter）時將終端捲動到底部',
   'settings.terminal.behavior.scrollOnPaste': '貼上時自動捲動',

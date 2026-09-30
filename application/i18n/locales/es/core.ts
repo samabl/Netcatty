@@ -665,7 +665,7 @@ Resalta el panel dividido enfocado:
   'settings.terminal.behavior.scrollOnInput.desc': 'Desplaza la terminal al final al escribir',
   'settings.terminal.behavior.scrollOnOutput': 'Desplazarse con la salida',
   'settings.terminal.behavior.scrollOnOutput.desc':
-    'Desplaza la terminal al final cuando llega nueva salida',
+    'Sigue la nueva salida al final sin interrumpir la lectura del historial',
   'settings.terminal.behavior.scrollOnKeyPress': 'Desplazarse al presionar una tecla',
   'settings.terminal.behavior.scrollOnKeyPress.desc':
     'Desplaza la terminal al final al presionar una tecla (p. ej., Enter)',

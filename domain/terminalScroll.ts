@@ -61,11 +61,49 @@ export const shouldScrollOnTerminalPaste = (
   settings?: Partial<TerminalSettings> | null,
 ): boolean => settings?.scrollOnPaste ?? true;
 
-export const scrollTerminalToBottomIfNeeded = (
+export const isTerminalViewportAtBottom = (
   terminal: TerminalScrollTarget,
 ): boolean => {
   const { baseY, viewportY } = terminal.buffer.active;
-  if (viewportY >= baseY) {
+  return viewportY >= baseY;
+};
+
+/**
+ * Force the viewport down when the user is anywhere above the bottom.
+ *
+ * Input-driven scrolling is allowed to override the reading position (typing
+ * returns to the prompt), so it uses this helper. Output must use
+ * {@link followTerminalOutputIfAtBottom} instead, which never moves a reader.
+ */
+export const scrollTerminalToBottomIfNeeded = (
+  terminal: TerminalScrollTarget,
+): boolean => {
+  if (isTerminalViewportAtBottom(terminal)) {
+    return false;
+  }
+
+  terminal.scrollToBottom();
+  return true;
+};
+
+/**
+ * Output-driven auto-scroll ("Scroll on output").
+ *
+ * New output keeps a following viewport glued to the newest rows, but must
+ * never pull a reader out of scrollback: while the viewport sits above the
+ * bottom the visible rows stay put and fresh output is appended below, so past
+ * output can be read without the view snapping back. Input keeps its own
+ * behavior: typing still returns the viewport to the bottom, see
+ * {@link scrollTerminalToBottomAfterInputIfEnabled}.
+ *
+ * The at-bottom call is a re-assert, not a move: xterm.js already follows new
+ * lines there, so it resolves to a zero-row scroll that only clears a stale
+ * user-scroll flag / DOM offset left behind by a burst (#2291).
+ */
+export const followTerminalOutputIfAtBottom = (
+  terminal: TerminalScrollTarget,
+): boolean => {
+  if (!isTerminalViewportAtBottom(terminal)) {
     return false;
   }
 

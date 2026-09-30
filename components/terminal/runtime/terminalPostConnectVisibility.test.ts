@@ -6,7 +6,7 @@ const attachmentSource = readFileSync(new URL('./terminalSessionAttachment.ts', 
 const startersSource = readFileSync(new URL('./createTerminalSessionStarters.ts', import.meta.url), 'utf8');
 
 const hiddenPostConnectFitGuard =
-  /setTimeout\(\(\) => \{\s*if \(ctx\.isVisibleRef\?\.current === false\) \{\s*notePendingOutputScrollIfEnabled\(ctx\);\s*return;\s*\}\s*if \(!ctx\.fitAddonRef\.current\) return;[\s\S]*ctx\.fitAddonRef\.current\.fit\(\)/;
+  /setTimeout\(\(\) => \{\s*if \(ctx\.isVisibleRef\?\.current === false\) \{\s*notePendingOutputScrollIfEnabled\(ctx, term\);\s*return;\s*\}\s*if \(!ctx\.fitAddonRef\.current\) return;[\s\S]*ctx\.fitAddonRef\.current\.fit\(\)/;
 
 test('reattached sessions do not fit hidden terminal panes after first output', () => {
   assert.match(attachmentSource, hiddenPostConnectFitGuard);

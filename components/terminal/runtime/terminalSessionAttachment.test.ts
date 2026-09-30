@@ -290,6 +290,34 @@ test("notePendingOutputScrollIfEnabled marks hidden output when scroll-on-output
   assert.equal(pendingOutputScrollRef.current, true);
 });
 
+test("notePendingOutputScrollIfEnabled marks a pane that is still following the tail", () => {
+  const pendingOutputScrollRef = { current: false };
+
+  notePendingOutputScrollIfEnabled(
+    {
+      terminalSettingsRef: { current: { scrollOnOutput: true } },
+      pendingOutputScrollRef,
+    } as never,
+    { buffer: { active: { baseY: 500, viewportY: 500 } } } as never,
+  );
+
+  assert.equal(pendingOutputScrollRef.current, true);
+});
+
+test("notePendingOutputScrollIfEnabled keeps a scrolled-up pane unmarked", () => {
+  const pendingOutputScrollRef = { current: false };
+
+  notePendingOutputScrollIfEnabled(
+    {
+      terminalSettingsRef: { current: { scrollOnOutput: true } },
+      pendingOutputScrollRef,
+    } as never,
+    { buffer: { active: { baseY: 500, viewportY: 480 } } } as never,
+  );
+
+  assert.equal(pendingOutputScrollRef.current, false);
+});
+
 test("writeSessionData clears renderer backlog while deferring IPC ack", () => {
   const term = {
     buffer: { active: { type: "normal" } },
@@ -1590,7 +1618,8 @@ test("hidden tab output marks pending scroll without scrolling immediately", asy
   const writes: string[] = [];
   let scrollCalls = 0;
   const term = {
-    buffer: { active: { type: "normal" } },
+    // A hidden pane that was following the tail keeps following in its buffer.
+    buffer: { active: { type: "normal", baseY: 40, viewportY: 40 } },
     _core: { _writeBuffer: { flushSync() {} } },
     write(data: string, callback?: () => void) {
       writes.push(data);
@@ -1629,21 +1658,16 @@ test("hidden tab output marks pending scroll without scrolling immediately", asy
   assert.equal(scrollCalls, 0);
 });
 
-test("visible output does not request another scroll when already at the bottom", () => {
-  let scrollCalls = 0;
+test("visible output keeps a following viewport pinned to the tail", () => {
+  const scrollTargets: Array<{ baseY: number; viewportY: number }> = [];
+  const active = { type: "normal", baseY: 10_000, viewportY: 10_000 };
   const term = {
-    buffer: {
-      active: {
-        type: "normal",
-        baseY: 10_000,
-        viewportY: 10_000,
-      },
-    },
+    buffer: { active },
     write(_data: string, callback?: () => void) {
       callback?.();
     },
     scrollToBottom() {
-      scrollCalls += 1;
+      scrollTargets.push({ baseY: active.baseY, viewportY: active.viewportY });
     },
   } as unknown as XTerm;
   const ctx = {
@@ -1660,24 +1684,20 @@ test("visible output does not request another scroll when already at the bottom"
 
   writeSessionData(ctx as never, term, "fresh output");
 
-  assert.equal(scrollCalls, 0);
+  // A zero-row re-assert is allowed; anything else would move a reader.
+  assert.deepEqual(scrollTargets, [{ baseY: 10_000, viewportY: 10_000 }]);
 });
 
-test("visible output scrolls when the user is viewing earlier output", () => {
-  let scrollCalls = 0;
+test("visible output never scrolls while the user is viewing earlier output", () => {
+  const scrollTargets: Array<{ baseY: number; viewportY: number }> = [];
+  const active = { type: "normal", baseY: 10_000, viewportY: 9_900 };
   const term = {
-    buffer: {
-      active: {
-        type: "normal",
-        baseY: 10_000,
-        viewportY: 9_900,
-      },
-    },
+    buffer: { active },
     write(_data: string, callback?: () => void) {
       callback?.();
     },
     scrollToBottom() {
-      scrollCalls += 1;
+      scrollTargets.push({ baseY: active.baseY, viewportY: active.viewportY });
     },
   } as unknown as XTerm;
   const ctx = {
@@ -1694,7 +1714,43 @@ test("visible output scrolls when the user is viewing earlier output", () => {
 
   writeSessionData(ctx as never, term, "fresh output");
 
-  assert.equal(scrollCalls, 1);
+  assert.deepEqual(scrollTargets, []);
+});
+
+test("hidden output leaves a scrolled-up reader unmarked for reveal scroll", async () => {
+  const active = { type: "normal", baseY: 10_000, viewportY: 9_900 };
+  const term = {
+    buffer: { active },
+    _core: { _writeBuffer: { flushSync() {} } },
+    write(_data: string, callback?: () => void) {
+      callback?.();
+    },
+    scrollToBottom() {
+      assert.fail("hidden scrolled-up output must not scroll");
+    },
+  } as unknown as XTerm;
+  const ctx = {
+    ...createContext(false),
+    isVisibleRef: { current: false },
+    pendingOutputScrollRef: { current: false },
+    terminalSettingsRef: {
+      current: {
+        showLineTimestamps: false,
+        scrollOnOutput: true,
+        forcePromptNewLine: false,
+      },
+    },
+    terminalSettings: {
+      showLineTimestamps: false,
+      scrollOnOutput: true,
+      forcePromptNewLine: false,
+    },
+  };
+
+  writeSessionData(ctx as never, term, "fresh output");
+  await new Promise((resolve) => { setTimeout(resolve, 190); });
+
+  assert.equal(ctx.pendingOutputScrollRef.current, false);
 });
 
 test("visible output does not scroll when output auto-scroll is disabled", () => {

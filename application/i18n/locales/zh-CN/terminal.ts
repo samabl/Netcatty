@@ -385,7 +385,7 @@ export const zhCNTerminalMessages: Messages = {
   'settings.terminal.behavior.scrollOnInput': '输入时自动滚动',
   'settings.terminal.behavior.scrollOnInput.desc': '输入时将终端滚动到底部',
   'settings.terminal.behavior.scrollOnOutput': '输出时自动滚动',
-  'settings.terminal.behavior.scrollOnOutput.desc': '有新输出时将终端滚动到底部',
+  'settings.terminal.behavior.scrollOnOutput.desc': '在底部跟随新输出，向上查看历史时不会被打断',
   'settings.terminal.behavior.scrollOnKeyPress': '按键时自动滚动',
   'settings.terminal.behavior.scrollOnKeyPress.desc': '按键（例如 Enter）时将终端滚动到底部',
   'settings.terminal.behavior.scrollOnPaste': '粘贴时自动滚动',

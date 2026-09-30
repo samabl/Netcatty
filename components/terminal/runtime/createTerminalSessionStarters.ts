@@ -1878,7 +1878,7 @@ export const createTerminalSessionStarters = (ctx: TerminalSessionStartersContex
             ctx.updateStatus("connected");
             setTimeout(() => {
               if (ctx.isVisibleRef?.current === false) {
-                notePendingOutputScrollIfEnabled(ctx);
+                notePendingOutputScrollIfEnabled(ctx, term);
                 return;
               }
               if (!ctx.fitAddonRef.current) return;

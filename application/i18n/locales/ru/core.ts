@@ -701,7 +701,7 @@ export const ruCoreMessages: Messages = {
   'settings.terminal.behavior.scrollOnInput.desc': 'Прокручивать терминал вниз при наборе текста',
   'settings.terminal.behavior.scrollOnOutput': 'Прокручивать при выводе',
   'settings.terminal.behavior.scrollOnOutput.desc':
-    'Прокручивать терминал вниз при появлении нового вывода',
+    'Следовать за новым выводом внизу, не прерывая чтение истории',
   'settings.terminal.behavior.scrollOnKeyPress': 'Прокручивать при нажатии клавиш',
   'settings.terminal.behavior.scrollOnKeyPress.desc':
     'Прокручивать терминал вниз при нажатии клавиши (например, Enter)',

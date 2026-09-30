@@ -750,7 +750,7 @@ Highlight the focused split pane:
   'settings.terminal.behavior.scrollOnInput.desc': 'Scroll terminal to bottom when typing',
   'settings.terminal.behavior.scrollOnOutput': 'Scroll on output',
   'settings.terminal.behavior.scrollOnOutput.desc':
-    'Scroll terminal to bottom when new output arrives',
+    'Follow new output at the bottom without interrupting history reading',
   'settings.terminal.behavior.scrollOnKeyPress': 'Scroll on key press',
   'settings.terminal.behavior.scrollOnKeyPress.desc':
     'Scroll terminal to bottom when pressing a key (e.g., Enter)',

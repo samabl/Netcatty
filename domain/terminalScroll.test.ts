@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  followTerminalOutputIfAtBottom,
+  isTerminalViewportAtBottom,
   scrollTerminalToBottomAfterInputIfEnabled,
   scrollTerminalToBottomIfNeeded,
   shouldScrollOnTerminalInput,
@@ -43,6 +45,35 @@ test("scrolls to the bottom when the user is viewing earlier output", () => {
 
   assert.equal(didScroll, true);
   assert.equal(fixture.scrollCalls, 1);
+});
+
+test("output auto-scroll never moves a viewport that is reading earlier output", () => {
+  const fixture = createScrollTarget(9_900);
+
+  assert.equal(isTerminalViewportAtBottom(fixture.terminal), false);
+
+  const didScroll = followTerminalOutputIfAtBottom(fixture.terminal);
+
+  assert.equal(didScroll, false);
+  assert.equal(fixture.scrollCalls, 0);
+});
+
+test("output auto-scroll re-asserts a following viewport", () => {
+  const fixture = createScrollTarget(10_000);
+
+  assert.equal(isTerminalViewportAtBottom(fixture.terminal), true);
+
+  const didScroll = followTerminalOutputIfAtBottom(fixture.terminal);
+
+  assert.equal(didScroll, true);
+  assert.equal(fixture.scrollCalls, 1);
+});
+
+test("a one-row peek above the tail is still reading history", () => {
+  const fixture = createScrollTarget(9_999);
+
+  assert.equal(followTerminalOutputIfAtBottom(fixture.terminal), false);
+  assert.equal(fixture.scrollCalls, 0);
 });
 
 test("printable input does not request another scroll when already at the bottom", () => {
