@@ -585,16 +585,21 @@ function startPtyJob(ptyStream, command, options) {
         clearStartupTimeout();
         // Use the *last* occurrence of the start marker to skip the echoed
         // wrapper command and capture only output after the real printf line.
-        const markerPattern = new RegExp(`${marker}_S[^\n\r]*(?:\r?\n|$)`, "g");
-        let boundary = -1;
-        let m;
-        while ((m = markerPattern.exec(preStartOutput)) !== null) {
-          boundary = m.index;
-        }
-        if (boundary !== -1) {
-          const afterBoundary = preStartOutput.slice(boundary);
-          const firstNl = afterBoundary.search(/\r?\n/);
-          const initialOutput = firstNl === -1 ? "" : afterBoundary.slice(firstNl).replace(/^\r?\n/, "");
+        //
+        // The marker line is not always CRLF-terminated: ConPTY / PSReadLine
+        // ends it with a bare CR plus cursor sequences (e.g.
+        // `...__S\x1b[67X\x1b[67C\r\x1b[?25h\x1b[?25l\nLINE_ONE`), so a
+        // `marker_S[^\n\r]*(?:\r?\n|$)` search finds no boundary at all. That
+        // used to skip the reset below and discard everything sharing the chunk
+        // with the marker — silently losing the command's first output lines.
+        // Locate the occurrence instead, then cut at the first CR/LF after it.
+        const markerIdx = preStartOutput.lastIndexOf(startMarker);
+        if (markerIdx !== -1) {
+          const afterMarker = preStartOutput.slice(markerIdx + startMarker.length);
+          const lineEnd = afterMarker.search(/[\r\n]/);
+          const initialOutput = lineEnd === -1
+            ? ""
+            : afterMarker.slice(lineEnd).replace(/^\r?\n?/, "");
           output = "";
           visibleOutput = "";
           visibleOutputOffset = 0;

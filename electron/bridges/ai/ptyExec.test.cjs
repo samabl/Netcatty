@@ -449,6 +449,32 @@ test("consecutive jobs wait for the PowerShell prompt after a split end marker",
   }
 });
 
+test("ConPTY CR-terminated start marker keeps the output in its own chunk", async () => {
+  class CapturePty extends EventEmitter {
+    write() {}
+  }
+  const pty = new CapturePty();
+  const job = startPtyJob(pty, "Write-Output 'LINE_ONE'; Write-Output 'LINE_TWO'", {
+    shellKind: "powershell",
+    stripMarkers: true,
+    timeoutMs: 1_000,
+  });
+  const { marker } = job;
+  // Real ConPTY / PSReadLine framing (captured from pwsh 7 on Windows): the
+  // marker row ends with cursor moves and a bare CR, and the first output line
+  // shares that PTY chunk. The old `marker_S[^\n\r]*(?:\r?\n|$)` boundary
+  // search matched nothing here, so the whole chunk after the marker row was
+  // discarded and the tool result lost its first output lines.
+  pty.emit("data", Buffer.from(
+    `\u001b[?25h\u001b[?25l\u001b[m${marker}_S\u001b[67X\u001b[67C\r\u001b[?25h\u001b[?25l\nLINE_ONE\r\n`,
+  ));
+  pty.emit("data", Buffer.from(`LINE_TWO\r\n${marker}_E:0\r\nPS C:\\Users\\alice> `));
+
+  const result = await job.resultPromise;
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(result.stdout, "LINE_ONE\nLINE_TWO");
+});
+
 test("non-target shells still finish at the end marker without waiting for a prompt", async () => {
   class CapturePty extends EventEmitter {
     write() {}
