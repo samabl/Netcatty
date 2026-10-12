@@ -44,7 +44,8 @@ for (const surface of ['catty', 'mcp-exec', 'mcp-job']) {
         const handlers = new Map();
         registerCattyExecHandlers({ ipcMain: { handle: (key, fn) => handlers.set(key, fn) },
           validateSender: () => true, sessions, mcpServerBridge: bridge, electronModule,
-          safeSend: (target, ...args) => target.send(...args), execViaPty, getFreshIdlePrompt: () => '' });
+          safeSend: (target, ...args) => target.send(...args), execViaPty, getFreshIdlePrompt: () => '',
+          getShellInputState: () => 'unknown', resolveShellInputState: async () => 'unknown' });
         pending = handlers.get('netcatty:ai:exec')({ sender: contents }, { sessionId: 'session', command: 'echo test', chatSessionId: 'chat' });
       } else {
         pending = bridge.dispatchBuiltinRpc(surface === 'mcp-job' ? 'netcatty/jobStart' : 'netcatty/exec', {

@@ -204,6 +204,9 @@ function registerCattyExecHandlers(ctx) {
           if (safety.blocked) {
             return { ok: false, error: `Command blocked by safety policy. Pattern: ${safety.matchedPattern}` };
           }
+          // Never interrupt a foreground command just to type this one: the
+          // PowerShell pending-input clear is Ctrl+C, which that process gets.
+          const inputState = await resolveShellInputState(session);
           return execViaPty(ptyStream, command, {
             onInterrupt: () => clearSessionFlowState(session),
             stripMarkers: true,
@@ -223,6 +226,7 @@ function registerCattyExecHandlers(ctx) {
             },
             chatSessionId,
             expectedPrompt: getFreshIdlePrompt(session),
+            inputState,
             typedInput: true,
             echoCommand: (rawCommand) => {
               const contents = electronModule?.webContents?.fromId?.(session.webContentsId);

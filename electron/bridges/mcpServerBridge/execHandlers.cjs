@@ -170,6 +170,9 @@ function createExecHandlerApi(ctx) {
             debugLog("handleExec:blocklisted", { sessionId, matchedPattern: safety.matchedPattern });
             return { ok: false, error: `Command blocked by safety policy. Pattern: ${safety.matchedPattern}` };
           }
+          // Never interrupt a foreground command just to type this one: the
+          // PowerShell pending-input clear is Ctrl+C, which that process gets.
+          const inputState = await resolveShellInputState(session);
           return execViaPty(ptyStream, command, {
             onInterrupt: () => clearSessionFlowState(session),
             trackForCancellation: activePtyExecs,
@@ -181,6 +184,7 @@ function createExecHandlerApi(ctx) {
             onProbeAborted: (marker) => echoCommandToSession(session, sessionId, `${marker}_R`, { syntheticEcho: false }),
             onEchoSuppressionPrime: (marker) => echoCommandToSession(session, sessionId, `${marker}_I`, { syntheticEcho: false }),
             expectedPrompt: getFreshIdlePrompt(session),
+            inputState,
             typedInput: true,
             echoCommand: (rawCommand) => echoCommandToSession(session, sessionId, rawCommand),
             chatSessionId,
@@ -297,7 +301,7 @@ function createExecHandlerApi(ctx) {
       backgroundJobs.set(jobId, job);
 
       // Probe so fish login shells are not mis-wrapped as posix (#1854).
-      return Promise.resolve(ensureSessionShellKind(session)).then(() => {
+      return Promise.resolve(ensureSessionShellKind(session)).then(async () => {
         if (probeCancelRequested || job.status === "stopping") {
           job.status = "cancelled";
           job.error = "Cancelled";
@@ -326,6 +330,7 @@ function createExecHandlerApi(ctx) {
 
         let handle;
         try {
+          const inputState = await resolveShellInputState(session);
           handle = startPtyJob(ptyStream, command, {
             onInterrupt: () => clearSessionFlowState(session),
             // Intentionally do NOT register in activePtyExecs: terminal_start jobs
@@ -341,6 +346,7 @@ function createExecHandlerApi(ctx) {
             onEchoSuppressionPrime: (marker) => echoCommandToSession(session, sessionId, `${marker}_I`, { syntheticEcho: false }),
             chatSessionId,
             expectedPrompt: getFreshIdlePrompt(session),
+            inputState,
             typedInput: true,
             echoCommand: (rawCommand) => echoCommandToSession(session, sessionId, rawCommand),
             maxBufferedChars: MAX_BACKGROUND_JOB_OUTPUT_CHARS,

@@ -134,6 +134,10 @@ function looksLikeIdleAutoLogout(outputTail) {
 function trackSessionIdlePrompt(session, chunk) {
   if (!session || typeof chunk !== "string" || !chunk) return "";
 
+  // Timestamp every chunk so input-state callers can tell a terminal that has
+  // gone quiet (a foreground command that prints nothing) from one that is
+  // still writing.
+  session._promptTrackAt = Date.now();
   const nextTail = `${session._promptTrackTail || ""}${chunk}`.slice(-MAX_PROMPT_TRACK_TAIL);
   session._promptTrackTail = nextTail;
 
@@ -170,6 +174,84 @@ function getFreshIdlePrompt(session) {
   if (!normalizedCached) return "";
 
   return normalizedTail.endsWith(normalizedCached) ? cached : "";
+}
+
+/**
+ * Classify what the session's live tail says about shell input, so callers can
+ * avoid writing the pending-input clear (Ctrl+C on PowerShell) into a shell that
+ * is still running a foreground command — that keystroke would kill it.
+ *
+ * - `idle`    the live tail still ends with the last known prompt. Safe to type,
+ *             and there is no pending input to discard.
+ * - `typed`   the known prompt is the start of the line being edited, so the
+ *             user typed without submitting. Clearing is safe and appropriate.
+ * - `busy`    the tail moved past the prompt — a command echo, process output,
+ *             or a silent foreground process (e.g. `iperf3 -s`). Clearing here
+ *             sends Ctrl+C to that process.
+ * - `unknown` no recognized prompt has been seen (custom prompts/PS1), or the
+ *             terminal is still writing. Callers keep the legacy behaviour
+ *             instead of guessing.
+ */
+const SHELL_BUSY_QUIET_MS = 600;
+
+function getShellInputState(session) {
+  if (!session) return "unknown";
+  const known = typeof session.lastIdlePrompt === "string" ? session.lastIdlePrompt : "";
+  const tail = session._promptTrackTail;
+  if (!known || typeof tail !== "string" || !tail) return "unknown";
+
+  const promptLine = stripAnsi(known).replace(/\r/g, "\n").replace(/\s+$/, "");
+  if (!promptLine) return "unknown";
+  const normalizedTail = stripAnsi(tail).replace(/\r/g, "\n");
+
+  // Prompt is the last thing on screen: the shell is waiting for input.
+  if (normalizedTail.replace(/\s+$/, "").endsWith(promptLine)) return "idle";
+
+  const lines = normalizedTail.split("\n");
+  const pendingLine = lines[lines.length - 1] || "";
+  if (pendingLine) {
+    // Text after the final newline is the line being edited: the user typed at
+    // the prompt without submitting, so there is no foreground process.
+    if (pendingLine.replace(/\s+$/, "").startsWith(promptLine)) return "typed";
+  } else {
+    // The tail ends on a fresh row (ConPTY often moves down after the prompt).
+    // Walk back to the last visible line: the prompt itself means idle.
+    for (let index = lines.length - 2; index >= 0; index -= 1) {
+      const line = lines[index];
+      if (!line.trim()) continue;
+      if (line.replace(/\s+$/, "") === promptLine) return "idle";
+      break;
+    }
+  }
+
+  // Something other than the prompt sits at the bottom of the screen. Only call
+  // it busy once the terminal has gone quiet: the final prompt of a finished
+  // command, and ConPTY's screen repaints, trail the output by a few hundred
+  // milliseconds, and refusing during that window would block legitimate
+  // follow-up commands.
+  const lastOutputAt = Math.max(session._promptTrackAt || 0, session.lastIdlePromptAt || 0);
+  return Date.now() - lastOutputAt >= SHELL_BUSY_QUIET_MS ? "busy" : "unknown";
+}
+
+/**
+ * Resolve the input state for an exec that is about to type into the session.
+ *
+ * A `busy` reading is re-checked for a short window first: the final prompt of a
+ * finished command, and ConPTY's screen repaints, can trail the output by a few
+ * hundred milliseconds, and refusing during that window would block legitimate
+ * follow-up commands. A foreground process that is still running stays busy for
+ * the whole window, so it is still protected.
+ */
+async function resolveShellInputState(session, { waitMs = 2000, pollMs = 200 } = {}) {
+  const first = getShellInputState(session);
+  if (first !== "busy") return first;
+  const deadline = Date.now() + waitMs;
+  while (Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, pollMs));
+    const state = getShellInputState(session);
+    if (state !== "busy") return state;
+  }
+  return "busy";
 }
 
 // ── URL helpers ──
@@ -966,6 +1048,8 @@ module.exports = {
   formatSyntheticEcho,
   extractTrailingIdlePrompt,
   getFreshIdlePrompt,
+  getShellInputState,
+  resolveShellInputState,
   isDefaultPowerShellPromptLine,
   isDefaultCmdPromptLine,
   isDefaultPosixPromptLine,

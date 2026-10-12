@@ -71,9 +71,33 @@ function startPtyJob(ptyStream, command, options) {
     maxBufferedChars = 0,
     normalizeFinalOutput = true,
     enforceWallTimeout = false,
+    inputState = "unknown",
   } = options || {};
 
   const marker = `__NCMCP_${Date.now().toString(36)}_${crypto.randomBytes(16).toString('hex')}__`;
+  // A foreground command the user started (or one an earlier job left running)
+  // must never be interrupted just to type a new command: the PowerShell
+  // pending-input clear is Ctrl+C, which the foreground process receives. Refuse
+  // instead of typing anything, mirroring the session-lock busy error.
+  if (inputState === "busy") {
+    return {
+      marker,
+      cancel: () => {},
+      getSnapshot: () => ({ stdout: "", status: "finished", foundStart: false }),
+      resultPromise: Promise.resolve({
+        ok: false,
+        stdout: "",
+        stderr: "",
+        exitCode: -1,
+        code: "SESSION_BUSY",
+        error: "Terminal is busy: a command is still running in the foreground of this session, so the agent did not interrupt it. Wait for it to finish (or stop it), then retry; for long-running services prefer terminal_start on an idle session.",
+      }),
+    };
+  }
+  // Verified idle at its prompt: there is no pending input to discard, so skip
+  // the clear keystroke entirely (it is the Ctrl+C above, and it also leaves
+  // stray `^C` rows in the session).
+  const skipInputClear = inputState === "idle";
   let resolvedShellKind = resolveEffectiveShellKind(shellKind, expectedPrompt, {
     loginShellHint,
   });
@@ -176,7 +200,12 @@ function startPtyJob(ptyStream, command, options) {
         return;
       }
       const timeoutSec = Math.round(timeoutMs / 1000);
-      finish(foundStart ? output : preStartOutput, -1, `Command timed out after ${timeoutSec}s without output`);
+      finish(
+        foundStart ? output : preStartOutput,
+        -1,
+        `Command produced no output for ${timeoutSec}s and was interrupted (SIGINT) to release the session. `
+        + "If it may still be running (a server, listener or long build), start it with terminal_start instead of terminal_execute.",
+      );
     }, timeoutMs);
   }
 
@@ -862,6 +891,12 @@ function startPtyJob(ptyStream, command, options) {
    * Readline-style shells kill text instead, so they keep the single write.
    */
   function writeInputWithClear(text) {
+    if (skipInputClear) {
+      // The session was verified idle at its prompt, so there is no pending
+      // input: type the wrapper directly instead of sending the clear.
+      writeInput(text);
+      return;
+    }
     const prefix = buildPendingInputClearPrefix(resolvedShellKind);
     const settleMs = pendingInputClearSettleMs(resolvedShellKind);
     if (!prefix || !(settleMs > 0)) {

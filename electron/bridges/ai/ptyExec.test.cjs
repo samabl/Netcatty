@@ -510,6 +510,46 @@ test("repainted wrapper echo rows are stripped from the captured output", async 
   assert.match(result.stdout, /iperf 3\.16\+/);
 });
 
+test("a busy session is never interrupted to type a new command", async () => {
+  const writes = [];
+  class CapturePty extends EventEmitter {
+    write(data) { writes.push(String(data)); }
+    signal() { writes.push("SIGINT"); }
+  }
+  const pty = new CapturePty();
+  const result = await execViaPty(pty, "Write-Output 'x'", {
+    shellKind: "powershell",
+    inputState: "busy",
+    timeoutMs: 1_000,
+  });
+
+  // Nothing may reach the PTY: the pending-input clear is Ctrl+C, which the
+  // foreground command would receive.
+  assert.deepEqual(writes, []);
+  assert.equal(result.ok, false);
+  assert.equal(result.code, "SESSION_BUSY");
+  assert.match(result.error, /busy/i);
+});
+
+test("an idle session skips the PowerShell pending-input clear", async () => {
+  const writes = [];
+  class CapturePty extends EventEmitter {
+    write(data) { writes.push(String(data)); }
+  }
+  const pty = new CapturePty();
+  const job = startPtyJob(pty, "Write-Output 'x'", {
+    shellKind: "powershell",
+    inputState: "idle",
+    timeoutMs: 1_000,
+  });
+
+  // With a verified idle prompt there is nothing to discard, so the wrapper is
+  // typed directly instead of sending Ctrl+C first.
+  assert.equal(writes.includes("\x03"), false, writes.join("|"));
+  assert.match(writes[0], /\$__NCMCP_/);
+  job.cancel();
+});
+
 test("PowerShell wrapper keeps its own statements out of PSReadLine history", () => {
   const marker = "__NCMCP_hist001_deadbeefdeadbeefdeadbeefdeadbeef__";
   const statements = buildWrappedCommand("Write-Output 'x'", "powershell", marker)

@@ -12,7 +12,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { existsSync } = require("node:fs");
 
-const { toUnpackedAsarPath, getFreshIdlePrompt, formatSyntheticEcho } = require("./ai/shellUtils.cjs");
+const { toUnpackedAsarPath, getFreshIdlePrompt, getShellInputState, resolveShellInputState, formatSyntheticEcho } = require("./ai/shellUtils.cjs");
 const { appendVaultAgentGuidance } = require("../shared/vaultAgentGuidance.cjs");
 const {
   checkBlocklistForShell,
@@ -2225,7 +2225,7 @@ const execHandlerApi = createExecHandlerApi({
   backgroundJobs, activePtyExecs,
   debugLog, getSessionMeta, checkCommandSafetyForShell, resolveSessionBlocklistShellKind, reserveSessionExecution, releaseSessionExecution,
   beginChatExecution, execViaRawPty, execViaPty, execViaChannel, startPtyJob,
-  getFreshIdlePrompt, echoCommandToSession, createBackgroundJobId, storeCompletedJobOutput,
+  getFreshIdlePrompt, getShellInputState, resolveShellInputState, echoCommandToSession, createBackgroundJobId, storeCompletedJobOutput,
   serializeBackgroundJob, validateSessionScope, Date, Error,
 });
 const {
