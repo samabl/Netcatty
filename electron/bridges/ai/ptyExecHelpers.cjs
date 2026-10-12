@@ -488,19 +488,43 @@ function findEndMarker(outputText, marker, { allowInline = false } = {}) {
   return null;
 }
 
+/** Escape a literal so it can be embedded in a RegExp source. */
+function escapeRegExpLiteral(value) {
+  return String(value ?? "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * Job tag shared by every typed wrapper row and by the marker itself
+ * (`__NCMCP_<tag>_<hex>__`). Terminal repaints (ConPTY re-emits the visible
+ * screen) can push echoed wrapper rows into the capture *after* the start
+ * marker, and those rows usually carry only a fragment of the full marker, so
+ * a marker-only filter misses them. The tag is always present in one piece.
+ */
+function markerTagPrefix(marker) {
+  const match = /^__NCMCP_[A-Za-z0-9]+/.exec(String(marker || ""));
+  return match ? match[0] : null;
+}
+
 function normalizePtyOutput(stdout, {
   stripMarkers = false,
   expectedPrompt = "",
   trimOutput = true,
   stripPrompt = true,
   markerToStrip = null,
+  markerPrefix = null,
 } = {}) {
   let cleaned = stripAnsi(stdout || "").replace(/\r/g, "");
   if (stripMarkers) {
     // Prefer the job-specific marker so user output that contains "__NCMCP_"
-    // (e.g. printf '__NCMCP_demo\n') is preserved.
-    const pattern = markerToStrip
-      ? new RegExp(`^[^\r\n]*${markerToStrip}[^\r\n]*[\r\n]*`, "gm")
+    // (e.g. printf '__NCMCP_demo\n') is preserved. markerPrefix additionally
+    // drops repainted wrapper rows whose marker text was split across rows.
+    const needles = [];
+    if (markerToStrip) needles.push(escapeRegExpLiteral(markerToStrip));
+    if (markerPrefix && markerPrefix !== markerToStrip) {
+      needles.push(escapeRegExpLiteral(markerPrefix));
+    }
+    const pattern = needles.length
+      ? new RegExp(`^[^\\r\\n]*(?:${needles.join("|")})[^\\r\\n]*[\\r\\n]*`, "gm")
       : /^[^\r\n]*__NCMCP_[^\r\n]*[\r\n]*/gm;
     cleaned = cleaned.replace(pattern, "");
   }
@@ -635,6 +659,7 @@ module.exports = {
   bashHistoryScratchNames,
   findEndMarker,
   normalizePtyOutput,
+  markerTagPrefix,
   appendBoundedOutput,
   consumeVisibleText,
   stripAnsi,

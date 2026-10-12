@@ -23,6 +23,7 @@ const {
   buildWrappedCommand,
   findEndMarker,
   normalizePtyOutput,
+  markerTagPrefix,
   appendBoundedOutput,
   consumeVisibleText,
   stripAnsi,
@@ -478,12 +479,18 @@ function startPtyJob(ptyStream, command, options) {
     let cleaned;
     let outputBaseOffset;
     let totalOutputChars;
+    // ConPTY repaints re-emit the visible screen, so echoed wrapper rows can
+    // land after the start marker and reach the capture with the marker text
+    // split across rows. Every typed row carries the job tag, so stripping by
+    // tag removes the echo that the marker-only filter misses.
+    const markerPrefix = markerTagPrefix(marker);
     if (maxBufferedChars > 0 && foundStart) {
       // Always strip this job's markers from the visible buffer — it accumulates
       // raw PTY data including the end-marker line that must not leak to callers.
       const strippedVisible = normalizePtyOutput(visibleOutput, {
         stripMarkers: true,
         markerToStrip: marker,
+        markerPrefix,
         expectedPrompt,
         trimOutput: normalizeFinalOutput,
         stripPrompt: true,
@@ -495,6 +502,7 @@ function startPtyJob(ptyStream, command, options) {
       const visibleStdout = normalizePtyOutput(stdout, {
         stripMarkers,
         markerToStrip: marker,
+        markerPrefix,
         expectedPrompt,
         trimOutput: false,
         stripPrompt: true,
@@ -503,6 +511,7 @@ function startPtyJob(ptyStream, command, options) {
         ? normalizePtyOutput(stdout, {
           stripMarkers,
           markerToStrip: marker,
+          markerPrefix,
           expectedPrompt,
           trimOutput: true,
           stripPrompt: true,

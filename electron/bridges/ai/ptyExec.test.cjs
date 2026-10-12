@@ -19,6 +19,7 @@ const {
   pendingInputClearSettleMs,
   buildWrappedCommand,
   PS_WRAPPER_MAX_LINE_CHARS,
+  markerTagPrefix,
 } = require("./ptyExecHelpers.cjs");
 const {
   getFreshIdlePrompt,
@@ -473,6 +474,40 @@ test("ConPTY CR-terminated start marker keeps the output in its own chunk", asyn
   const result = await job.resultPromise;
   assert.equal(result.ok, true, JSON.stringify(result));
   assert.equal(result.stdout, "LINE_ONE\nLINE_TWO");
+});
+
+test("repainted wrapper echo rows are stripped from the captured output", async () => {
+  class CapturePty extends EventEmitter {
+    write() {}
+  }
+  const pty = new CapturePty();
+  const job = startPtyJob(pty, "iperf3 --version", {
+    shellKind: "powershell",
+    stripMarkers: true,
+    timeoutMs: 1_000,
+  });
+  const { marker } = job;
+  const tag = markerTagPrefix(marker);
+  assert.ok(tag && tag.startsWith("__NCMCP_"), `expected a job tag, got ${tag}`);
+  // ConPTY re-emits the visible screen, so the echoed wrapper rows can reach
+  // the capture after the start marker. Those rows hold only a fragment of the
+  // random marker (the terminal wrapped it mid-marker), which is why the
+  // job-marker-only filter used to leak ~10 KB of `$__NCMCP_...` echo into the
+  // tool result instead of the command output.
+  pty.emit("data", Buffer.from(
+    `\u001b[?25h\u001b[?25l\u001b[m${marker}_S\u001b[67X\u001b[67C\r\u001b[?25h\u001b[?25l\n`,
+  ));
+  pty.emit("data", Buffer.from(
+    `\u001b[HPS C:\\Users\\alice> \u001b[92m${tag}\u001b[90m+=\u001b[36m'c239b6e4e122c6a378bbd37ed193f___S''; $env:PAGER=''c'\u001b[m\r\n`
+    + `PS C:\\Users\\alice> \u001b[93miperf3 --version\u001b[m\r\n`
+    + "iperf 3.16+ (cJSON 1.7.15)\r\n"
+    + `PS C:\\Users\\alice> ^C\r\n${marker}_E:0\r\nPS C:\\Users\\alice> `,
+  ));
+
+  const result = await job.resultPromise;
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(result.stdout.includes("__NCMCP_"), false, result.stdout);
+  assert.match(result.stdout, /iperf 3\.16\+/);
 });
 
 test("non-target shells still finish at the end marker without waiting for a prompt", async () => {
