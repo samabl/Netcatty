@@ -1867,6 +1867,71 @@ test("primed suppression hides the chunked PowerShell wrapper and keeps its outp
 });
 
 
+test("primed suppression releases on ConPTY-framed PowerShell markers", async () => {
+  const preload = loadPreloadWithFakeElectron();
+  try {
+    const received = [];
+    const sessionId = "powershell-conpty-framing";
+    const marker = "__NCMCP_mv4p01wv_d03b79f23284768196af7204b49493a3__";
+    const { buildWrappedCommand } = require("./bridges/ai/ptyExecHelpers.cjs");
+    preload.api.onSessionData(sessionId, (chunk) => received.push(chunk));
+    preload.handlers.get("netcatty:data")({}, { sessionId, data: `${marker}_I\n` });
+
+    const statements = buildWrappedCommand("Write-Output 'visible-output'", "powershell", marker)
+      .split("\r")
+      .filter(Boolean);
+    // Real ConPTY / PSReadLine framing (captured from pwsh 7 on Windows):
+    // every row carries cursor show/hide and SGR sequences, so neither the
+    // echoed wrapper nor the `_S`/`_E` marker output starts the raw line.
+    // Matching those markers only at the raw line start never released the
+    // primed suppression, which muted the rest of the session's display.
+    const echo = statements
+      .map((statement) => `\u001b[?25hPS C:\\Users\\alice> \u001b[92m${statement}\u001b[m\r\n`)
+      .join("");
+    const data = `${echo}\u001b[?25h\u001b[?25l\u001b[m${marker}_S\r\n`
+      + "\u001b[?25h\u001b[?25lvisible-output\r\n"
+      + `\u001b[?25h\u001b[?25l${marker}_E:0\r\n`
+      + "PS C:\\Users\\alice>\u001b[35X\u001b[35C";
+    for (let offset = 0; offset < data.length; offset += 7) {
+      preload.handlers.get("netcatty:data")({}, { sessionId, data: data.slice(offset, offset + 7) });
+    }
+    await sleep(120);
+
+    const display = received.join("");
+    assert.equal(display.includes("__NCMCP_"), false, display);
+    assert.equal(display.includes("visible-output"), true, display);
+    assert.equal(display.includes("PS C:\\Users\\alice>"), true, display);
+  } finally {
+    preload.cleanup();
+  }
+});
+
+
+test("ConPTY-framed probe markers still arm and release suppression", () => {
+  const preload = loadPreloadWithFakeElectron();
+  try {
+    const received = [];
+    const sessionId = "powershell-conpty-probe";
+    const marker = "__NCMCP_mframe01_ccbc892e865a115a80c88afdc77b96a6__";
+    preload.api.onSessionData(sessionId, (chunk) => received.push(chunk));
+    const send = (data) => preload.handlers.get("netcatty:data")({}, { sessionId, data });
+    // The shell-emitted _Q line reaches the renderer behind control sequences,
+    // so arming cannot depend on a raw line start either.
+    send(`\u001b[?25l\u001b[m${marker}_Q`);
+    send("PS C:\\Users\\alice> ");
+    send(`\u001b[?25h${marker}=0; wrapped-command\r\n`);
+    send(`\u001b[?25h\u001b[?25l${marker}_S\r\n`);
+    send("\u001b[?25h\u001b[?25lvisible-output\r\n");
+    const display = received.join("");
+    assert.equal(display.includes("__NCMCP_"), false, display);
+    assert.equal(display.includes("wrapped-command"), false, display);
+    assert.equal(display.includes("visible-output\r\n"), true, display);
+  } finally {
+    preload.cleanup();
+  }
+});
+
+
 test("ordinary text resembling an OpenWrt continuation is released", async () => {
   const preload = loadPreloadWithFakeElectron();
   try {

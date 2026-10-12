@@ -112,6 +112,26 @@ function clearMcpSessionState(sessionId) {
   _mcpAbortedProbes.delete(sessionId);
 }
 
+// Terminal emitters never hand us a "clean" line: ConPTY and PSReadLine wrap
+// the marker output in cursor/SGR control sequences (e.g.
+// `\x1b[?25h\x1b[?25l\x1b[m__NCMCP_..._S\r\n`), and remote shells can prefix it
+// with CR redraws. The suppression lifecycle below is anchored on the marker,
+// so it must be matched on a line with those sequences removed. Without this,
+// the release line never matches, the armed suppression is never lifted and the
+// terminal display stays muted (no command output, no prompt) for the rest of
+// the session.
+const MCP_CONTROL_SEQUENCE_PATTERN = /(?:\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\))|(?:\u001b\[[0-?]*[ -/]*[@-~])|(?:\u001b[@-Z\\-_])/g;
+
+function stripMcpControlSequences(value) {
+  return String(value ?? "").replace(MCP_CONTROL_SEQUENCE_PATTERN, "");
+}
+
+function normalizeMcpMarkerLine(value) {
+  // Leading control bytes cover CR redraw prefixes and any residual ESC byte
+  // from a sequence that was split across PTY chunks.
+  return stripMcpControlSequences(value).replace(/^[\u0000-\u001f]+/, "");
+}
+
 function filterProbePromptFragment(sessionId, fragment) {
   const reset = fragment.match(/(__NCMCP_(?:(?!__NCMCP_)[A-Za-z0-9_])+)_R/);
   if (reset) {
@@ -122,16 +142,16 @@ function filterProbePromptFragment(sessionId, fragment) {
     if (_mcpProbePrompts.get(sessionId) === reset[1]) _mcpProbePrompts.delete(sessionId);
     return true;
   }
+  const markerLine = normalizeMcpMarkerLine(fragment);
   // I starts suppression before multiline input; Q keeps it active after
   // the live shell probe. Both end only at the matching command start/reset.
-  const completion = fragment.match(/^\r?(__NCMCP_[A-Za-z0-9_]+)_[IQ]/);
+  const completion = markerLine.match(/^(__NCMCP_[A-Za-z0-9_]+)_[IQ]/);
   if (completion && !_mcpAbortedProbes.get(sessionId)?.has(completion[1])) {
     _mcpProbePrompts.set(sessionId, completion[1]);
   }
   const marker = _mcpProbePrompts.get(sessionId);
   if (!marker) return false;
-  const line = fragment.replace(/^\r/, "");
-  if (line.startsWith(`${marker}_S`) || line.startsWith(`${marker}_E`)) {
+  if (markerLine.startsWith(`${marker}_S`) || markerLine.startsWith(`${marker}_E`)) {
     _mcpProbePrompts.delete(sessionId);
   }
   return true;
