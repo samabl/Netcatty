@@ -510,6 +510,40 @@ test("repainted wrapper echo rows are stripped from the captured output", async 
   assert.match(result.stdout, /iperf 3\.16\+/);
 });
 
+test("PowerShell wrapper keeps its own statements out of PSReadLine history", () => {
+  const marker = "__NCMCP_hist001_deadbeefdeadbeefdeadbeefdeadbeef__";
+  const statements = buildWrappedCommand("Write-Output 'x'", "powershell", marker)
+    .split("\r")
+    .filter(Boolean);
+
+  // Every line PSReadLine submits is recorded unless the wrapper filters it, so
+  // the whole wrapper must stay inside the statement budget (a wrapped line
+  // leaks its echo) and carry the reserved prefix.
+  for (const statement of statements) {
+    assert.ok(
+      statement.length <= PS_WRAPPER_MAX_LINE_CHARS,
+      `statement is ${statement.length} chars: ${statement}`,
+    );
+  }
+  assert.equal(statements.includes("__NCMCP_"), false);
+
+  const accumulatorIndex = statements.findIndex((statement) => /^\$__NCMCP_[A-Za-z0-9]+=''$/.test(statement));
+  assert.ok(accumulatorIndex > 0, statements.join("\n"));
+  const installIndex = statements.findIndex((statement) => statement.includes("Set-PSReadLineOption -AddToHistoryHandler"));
+  // The handler has to be active before the first accumulator line is
+  // submitted; otherwise that line is already in the user's history.
+  assert.ok(installIndex !== -1 && installIndex < accumulatorIndex, statements.join("\n"));
+
+  const guards = statements.slice(0, accumulatorIndex);
+  for (const guard of guards) {
+    assert.match(guard, /__NCMCP_/, `guard line must be hidden by the renderer filter: ${guard}`);
+  }
+  // Delegating to the previously active handler keeps the built-in
+  // AddToHistoryOption result (and any user handler) working.
+  assert.ok(guards.some((guard) => guard.includes(".Invoke($l)")), guards.join("\n"));
+  assert.ok(guards.some((guard) => guard.includes("if($__NCMCP_d)")), guards.join("\n"));
+});
+
 test("non-target shells still finish at the end marker without waiting for a prompt", async () => {
   class CapturePty extends EventEmitter {
     write() {}
@@ -1028,8 +1062,10 @@ test("PowerShell wrapper is typed as short statements that cannot wrap", () => {
 
   // Replay the accumulation the way the shell does: the reconstructed text must
   // contain the original command exactly (including escaped quotes/newlines).
+  // The leading statements are the PSReadLine history guard; the accumulator
+  // starts at its initialiser.
   let accumulated = "";
-  for (const line of lines.slice(0, -1)) {
+  for (const line of lines.slice(lines.indexOf(`${accumulator}=''`), -1)) {
     if (line === `${accumulator}=''`) continue; // strict-mode-safe initialiser
     const assignment = new RegExp(`^\\${accumulator}\\+=(.*)$`).exec(line);
     assert.ok(assignment, `unexpected statement: ${line}`);

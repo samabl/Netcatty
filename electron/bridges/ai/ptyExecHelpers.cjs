@@ -257,6 +257,38 @@ function powerShellNewlineSnippet(separator) {
 }
 
 /**
+ * Keep the agent's typed wrapper out of the user's PSReadLine history.
+ *
+ * Every wrapper statement is submitted with Enter, so without this the shell
+ * records ~17 internal `$__NCMCP_...` lines per agent command. Up/Down then walk
+ * history entries the renderer deliberately hides (every line containing
+ * `__NCMCP_` is dropped from the display), so history navigation looks dead
+ * while Enter still re-runs the recalled wrapper statement. Measured on
+ * pwsh 7 / PSReadLine 2.4.5: 18 history entries after a single agent command.
+ *
+ * Lines stay inside the statement budget and are complete statements:
+ *  - `$__NCMCP_p` is the handler that was active before us — the built-in
+ *    `Func<string,object>` by default, or the user's own script block. Our
+ *    handler calls it for every non-internal line, so the built-in
+ *    AddToHistoryOption result and any user handler keep working.
+ *  - `$__NCMCP_s` stringifies it: an already-installed Netcatty handler
+ *    contains `__NCMCP_` in its source, so re-installing (and nesting the chain
+ *    once per job) is skipped.
+ *  - Every line carries the reserved `__NCMCP_` prefix, so the renderer hides
+ *    the guard's own echo and, once the handler is active, filters these lines
+ *    from history too. Only the first job in a shell session records them.
+ */
+function powerShellHistoryGuardStatements() {
+  return [
+    "$__NCMCP_p=$(try{(Get-PSReadLineOption).AddToHistoryHandler}catch{})",
+    "$__NCMCP_h={param($l)$l-notmatch'__NCMCP_' -and $__NCMCP_p.Invoke($l)}",
+    "$__NCMCP_s=[string]$__NCMCP_p",
+    "$__NCMCP_d=$__NCMCP_p -and $__NCMCP_s -notmatch'__NCMCP_'",
+    "if($__NCMCP_d){Set-PSReadLineOption -AddToHistoryHandler $__NCMCP_h}",
+  ];
+}
+
+/**
  * Build the PowerShell wrapper as several SHORT physical lines instead of one
  * enormous one.
  *
@@ -285,7 +317,7 @@ function buildPowerShellWrapperLines(wrapperText, marker) {
   );
   // Initialise first: `+=` on an unset variable is an error under
   // Set-StrictMode, and profiles do set it.
-  const statements = [`${acc}=''`];
+  const statements = [...powerShellHistoryGuardStatements(), `${acc}=''`];
   // Odd indices of a split with a capturing group are the separators.
   const parts = String(wrapperText ?? "").split(/(\r\n|\n|\r)/);
   for (let index = 0; index < parts.length; index += 1) {
