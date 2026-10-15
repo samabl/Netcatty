@@ -19,11 +19,9 @@ const {
   hasExpectedPromptSuffix,
   resolveEffectiveShellKind,
   buildPendingInputClearPrefix,
-  pendingInputClearSettleMs,
   buildWrappedCommand,
   findEndMarker,
   normalizePtyOutput,
-  markerTagPrefix,
   appendBoundedOutput,
   consumeVisibleText,
   stripAnsi,
@@ -71,33 +69,9 @@ function startPtyJob(ptyStream, command, options) {
     maxBufferedChars = 0,
     normalizeFinalOutput = true,
     enforceWallTimeout = false,
-    inputState = "unknown",
   } = options || {};
 
   const marker = `__NCMCP_${Date.now().toString(36)}_${crypto.randomBytes(16).toString('hex')}__`;
-  // A foreground command the user started (or one an earlier job left running)
-  // must never be interrupted just to type a new command: the PowerShell
-  // pending-input clear is Ctrl+C, which the foreground process receives. Refuse
-  // instead of typing anything, mirroring the session-lock busy error.
-  if (inputState === "busy") {
-    return {
-      marker,
-      cancel: () => {},
-      getSnapshot: () => ({ stdout: "", status: "finished", foundStart: false }),
-      resultPromise: Promise.resolve({
-        ok: false,
-        stdout: "",
-        stderr: "",
-        exitCode: -1,
-        code: "SESSION_BUSY",
-        error: "Terminal is busy: a command is still running in the foreground of this session, so the agent did not interrupt it. Wait for it to finish (or stop it), then retry; for long-running services prefer terminal_start on an idle session.",
-      }),
-    };
-  }
-  // Verified idle at its prompt: there is no pending input to discard, so skip
-  // the clear keystroke entirely (it is the Ctrl+C above, and it also leaves
-  // stray `^C` rows in the session).
-  const skipInputClear = inputState === "idle";
   let resolvedShellKind = resolveEffectiveShellKind(shellKind, expectedPrompt, {
     loginShellHint,
   });
@@ -200,12 +174,7 @@ function startPtyJob(ptyStream, command, options) {
         return;
       }
       const timeoutSec = Math.round(timeoutMs / 1000);
-      finish(
-        foundStart ? output : preStartOutput,
-        -1,
-        `Command produced no output for ${timeoutSec}s and was interrupted (SIGINT) to release the session. `
-        + "If it may still be running (a server, listener or long build), start it with terminal_start instead of terminal_execute.",
-      );
+      finish(foundStart ? output : preStartOutput, -1, `Command timed out after ${timeoutSec}s without output`);
     }, timeoutMs);
   }
 
@@ -508,18 +477,12 @@ function startPtyJob(ptyStream, command, options) {
     let cleaned;
     let outputBaseOffset;
     let totalOutputChars;
-    // ConPTY repaints re-emit the visible screen, so echoed wrapper rows can
-    // land after the start marker and reach the capture with the marker text
-    // split across rows. Every typed row carries the job tag, so stripping by
-    // tag removes the echo that the marker-only filter misses.
-    const markerPrefix = markerTagPrefix(marker);
     if (maxBufferedChars > 0 && foundStart) {
       // Always strip this job's markers from the visible buffer — it accumulates
       // raw PTY data including the end-marker line that must not leak to callers.
       const strippedVisible = normalizePtyOutput(visibleOutput, {
         stripMarkers: true,
         markerToStrip: marker,
-        markerPrefix,
         expectedPrompt,
         trimOutput: normalizeFinalOutput,
         stripPrompt: true,
@@ -531,7 +494,6 @@ function startPtyJob(ptyStream, command, options) {
       const visibleStdout = normalizePtyOutput(stdout, {
         stripMarkers,
         markerToStrip: marker,
-        markerPrefix,
         expectedPrompt,
         trimOutput: false,
         stripPrompt: true,
@@ -540,7 +502,6 @@ function startPtyJob(ptyStream, command, options) {
         ? normalizePtyOutput(stdout, {
           stripMarkers,
           markerToStrip: marker,
-          markerPrefix,
           expectedPrompt,
           trimOutput: true,
           stripPrompt: true,
@@ -623,21 +584,16 @@ function startPtyJob(ptyStream, command, options) {
         clearStartupTimeout();
         // Use the *last* occurrence of the start marker to skip the echoed
         // wrapper command and capture only output after the real printf line.
-        //
-        // The marker line is not always CRLF-terminated: ConPTY / PSReadLine
-        // ends it with a bare CR plus cursor sequences (e.g.
-        // `...__S\x1b[67X\x1b[67C\r\x1b[?25h\x1b[?25l\nLINE_ONE`), so a
-        // `marker_S[^\n\r]*(?:\r?\n|$)` search finds no boundary at all. That
-        // used to skip the reset below and discard everything sharing the chunk
-        // with the marker — silently losing the command's first output lines.
-        // Locate the occurrence instead, then cut at the first CR/LF after it.
-        const markerIdx = preStartOutput.lastIndexOf(startMarker);
-        if (markerIdx !== -1) {
-          const afterMarker = preStartOutput.slice(markerIdx + startMarker.length);
-          const lineEnd = afterMarker.search(/[\r\n]/);
-          const initialOutput = lineEnd === -1
-            ? ""
-            : afterMarker.slice(lineEnd).replace(/^\r?\n?/, "");
+        const markerPattern = new RegExp(`${marker}_S[^\n\r]*(?:\r?\n|$)`, "g");
+        let boundary = -1;
+        let m;
+        while ((m = markerPattern.exec(preStartOutput)) !== null) {
+          boundary = m.index;
+        }
+        if (boundary !== -1) {
+          const afterBoundary = preStartOutput.slice(boundary);
+          const firstNl = afterBoundary.search(/\r?\n/);
+          const initialOutput = firstNl === -1 ? "" : afterBoundary.slice(firstNl).replace(/^\r?\n/, "");
           output = "";
           visibleOutput = "";
           visibleOutputOffset = 0;
@@ -793,13 +749,10 @@ function startPtyJob(ptyStream, command, options) {
   let inputWriteTimer = null;
   let inputDrainListener = null;
   let inputWriteGeneration = 0;
-  let clearSettleTimer = null;
   function stopInputWrite() {
     inputWriteGeneration += 1;
     clearTimeout(inputWriteTimer);
     inputWriteTimer = null;
-    clearTimeout(clearSettleTimer);
-    clearSettleTimer = null;
     if (inputDrainListener) ptyStream.removeListener("drain", inputDrainListener);
     inputDrainListener = null;
   }
@@ -867,56 +820,9 @@ function startPtyJob(ptyStream, command, options) {
     writeNext();
   }
 
-  /**
-   * Deliver the pending-input clear keystroke without arming the input-delivery
-   * deadlines, so the settle window below cannot consume the job's startup or
-   * first-output budget.
-   */
-  function writeClearKeystroke(prefix) {
-    stopInputWrite();
-    clearStartupTimeout();
-    clearTimeout(timeoutId);
-    deliveringInput = true;
-    ptyStream.write(prefix);
-  }
-
-  /**
-   * Write the pending-input clear, then the text.
-   *
-   * PowerShell's clear is an edit-mode keystroke rather than text, so writing it
-   * fused with the wrapper makes the line editor swallow the wrapper as part of
-   * the same key sequence (measured on pwsh 7.6 / PSReadLine 2.4.5): the command
-   * never reaches the shell and the job hangs until its startup timeout. Give
-   * the keystroke its own write and let it settle before typing the text.
-   * Readline-style shells kill text instead, so they keep the single write.
-   */
-  function writeInputWithClear(text) {
-    if (skipInputClear) {
-      // The session was verified idle at its prompt, so there is no pending
-      // input: type the wrapper directly instead of sending the clear.
-      writeInput(text);
-      return;
-    }
-    const prefix = buildPendingInputClearPrefix(resolvedShellKind);
-    const settleMs = pendingInputClearSettleMs(resolvedShellKind);
-    if (!prefix || !(settleMs > 0)) {
-      writeInput(`${prefix}${text}`);
-      return;
-    }
-
-    writeClearKeystroke(prefix);
-    const generation = inputWriteGeneration;
-    clearTimeout(clearSettleTimer);
-    clearSettleTimer = setTimeout(() => {
-      clearSettleTimer = null;
-      if (finished || cancelRequested || generation !== inputWriteGeneration) return;
-      writeInput(text);
-    }, settleMs);
-  }
-
   function writeWrappedCommand() {
     const wrapped = buildWrappedCommand(command, resolvedShellKind, marker, probeLiveShell);
-    writeInputWithClear(wrapped);
+    writeInput(`${buildPendingInputClearPrefix(resolvedShellKind)}${wrapped}`);
   }
 
   // Prime the renderer's display suppression before the first byte is typed
@@ -935,7 +841,7 @@ function startPtyJob(ptyStream, command, options) {
     }
   }
   if (probingShell) {
-    writeInputWithClear(buildLiveShellProbe(marker));
+    writeInput(`${buildPendingInputClearPrefix(resolvedShellKind)}${buildLiveShellProbe(marker)}`);
   } else {
     writeWrappedCommand();
   }

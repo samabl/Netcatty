@@ -8,7 +8,7 @@ const {
   execViaChannel,
   execViaRawPty,
 } = require("../bridges/ai/ptyExec.cjs");
-const { getFreshIdlePrompt, resolveShellInputState, formatSyntheticEcho } = require("../bridges/ai/shellUtils.cjs");
+const { getFreshIdlePrompt, formatSyntheticEcho } = require("../bridges/ai/shellUtils.cjs");
 const {
   ensureSessionShellKind,
   remoteDisallowsExecChannelProbe, ensureSessionShellKindForExec,
@@ -307,10 +307,6 @@ function createWorkerAiExecHandler({
       if (safety.blocked) {
         return { ok: false, error: `Command blocked by safety policy. Pattern: ${safety.matchedPattern}` };
       }
-      // A foreground command the user started must not be interrupted just to
-      // type this one; the guard waits briefly for a just-finished command to
-      // settle before declaring the session busy.
-      const inputState = await resolveShellInputState(session);
       return execViaPty(ptyStream, command, {
         onInterrupt: () => clearSessionFlowState(session),
         stripMarkers: true,
@@ -334,7 +330,6 @@ function createWorkerAiExecHandler({
         },
         chatSessionId,
         expectedPrompt: getFreshIdlePrompt(session),
-        inputState,
         typedInput: true,
         echoCommand: (rawCommand) => {
           event?.sender?.send?.("netcatty:data", {
@@ -515,7 +510,6 @@ function createWorkerAiJobStartHandler({
     );
     let handle;
     try {
-      const inputState = await resolveShellInputState(session);
       handle = startPtyJob(ptyStream, command, {
         onInterrupt: () => clearSessionFlowState(session),
         timeoutMs,
@@ -537,7 +531,6 @@ function createWorkerAiJobStartHandler({
         },
         chatSessionId,
         expectedPrompt: getFreshIdlePrompt(session),
-        inputState,
         typedInput: true,
         echoCommand: (rawCommand) => {
           event?.sender?.send?.("netcatty:data", {

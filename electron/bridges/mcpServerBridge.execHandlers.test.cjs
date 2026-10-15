@@ -85,10 +85,6 @@ function createExecHandlerTestContext({ sessions, backgroundJobs }) {
     getFreshIdlePrompt() {
       return "";
     },
-    getShellInputState() {
-      return "unknown";
-    },
-      resolveShellInputState: async () => "unknown",
     echoCommandToSession() {},
     validateSessionScope() {
       return null;

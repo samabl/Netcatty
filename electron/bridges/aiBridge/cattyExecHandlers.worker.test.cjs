@@ -49,10 +49,6 @@ function createWorkerExecHarness({ meta, commonSafety = { blocked: false }, shel
     getFreshIdlePrompt() {
       return "";
     },
-    getShellInputState() {
-      return "unknown";
-    },
-      resolveShellInputState: async () => "unknown",
   });
 
   return { ipcMain, requests };
@@ -149,10 +145,6 @@ test("catty AI exec proxies to the terminal worker when the real session lives i
     getFreshIdlePrompt() {
       return "";
     },
-    getShellInputState() {
-      return "unknown";
-    },
-      resolveShellInputState: async () => "unknown",
   });
 
   const result = await ipcMain.handlers.get("netcatty:ai:exec")(

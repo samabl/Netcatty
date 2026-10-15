@@ -74,10 +74,6 @@ function registerSerialExecHandler(session) {
     getFreshIdlePrompt() {
       return "";
     },
-    getShellInputState() {
-      return "unknown";
-    },
-      resolveShellInputState: async () => "unknown",
     // Production resolves this through the aiBridge handler context
     // (electron/bridges base), so point the handler at the real module here.
     require(spec) {

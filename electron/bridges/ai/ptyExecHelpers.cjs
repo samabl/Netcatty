@@ -188,152 +188,16 @@ function buildPendingInputClearPrefix(shellKind) {
     case "cmd":
       return "\x1b";
     case "powershell":
-      // Ctrl+C ("abandon the current line") is the only PowerShell binding that
-      // holds in every PSReadLine edit mode. The previous Escape/vi hybrid
-      // ("\x1bggd2147483647d\x1br\x1b\x1bi\x08") only cleared Emacs mode:
-      // measured against pwsh 7.6 / PSReadLine 2.4.5 in the default Windows
-      // edit mode it left the pending line untouched and inserted the
-      // remaining bytes as literals, so the wrapper was still concatenated
-      // onto typed-but-not-entered text. Escape alone, Ctrl+A Ctrl+K, Ctrl+K,
-      // Ctrl+U and Escape+Ctrl+U each fail in one or more of the Windows,
-      // Emacs and Vi modes, and Ctrl+A/Ctrl+K leak a literal "^K".
-      // On an already empty prompt this is a silent no-op, so it costs nothing
-      // on the common path. It must still be delivered as its own keystroke —
-      // see pendingInputClearSettleMs below.
-      return "\x03";
+      // Vi gg plus a counted dd removes the whole multiline buffer, including
+      // in PSReadLine 2.0 where dG is unavailable. Escape+r is Emacs
+      // RevertLine. Repeated Escape clears Windows mode, and the final
+      // i+Backspace leaves every mode on an empty editable line.
+      return "\x1bggd2147483647d\x1br\x1b\x1bi\x08";
     default:
       // Kill the suffix before the prefix. Canonical/no-editing terminals do
       // not bind Ctrl+K; the trailing Ctrl+U must erase that literal byte too.
       return "\x0b\x15";
   }
-}
-
-// Milliseconds to wait after writing the clear prefix before typing the
-// wrapper. PowerShell's clear is an edit-mode keystroke, not text: written in
-// the same chunk as the wrapper, the line editor consumes the command as part
-// of the same key sequence and the job hangs until its startup timeout
-// (measured on pwsh 7.6 / PSReadLine 2.4.5). The readline-style shells above
-// kill text instead, so they keep the single-write form.
-const POWERSHELL_CLEAR_SETTLE_MS = 120;
-
-function pendingInputClearSettleMs(shellKind) {
-  return shellKind === "powershell" ? POWERSHELL_CLEAR_SETTLE_MS : 0;
-}
-
-// Longest physical input line the PowerShell wrapper may type. Real terminals
-// can be narrower than this, but every line here is a complete statement, so
-// even a narrower pane only costs an extra row — never a line-editor
-// continuation.
-const PS_WRAPPER_MAX_LINE_CHARS = 72;
-
-/**
- * Split text into code-point-safe pieces whose single-quoted PowerShell escape
- * fits the statement budget. Iterating a string yields whole code points, so a
- * surrogate pair never lands on a chunk boundary; quoting cost is charged per
- * character because `'` doubles.
- */
-function splitPowerShellChunks(text, budget) {
-  const chunks = [];
-  let current = "";
-  let used = 0;
-  for (const ch of String(text ?? "")) {
-    const cost = ch === "'" ? 2 : ch.length;
-    if (current && used + cost > budget) {
-      chunks.push(current);
-      current = "";
-      used = 0;
-    }
-    current += ch;
-    used += cost;
-  }
-  if (current) chunks.push(current);
-  return chunks;
-}
-
-function powerShellNewlineSnippet(separator) {
-  if (separator === "\r\n") return "[char]13+[char]10";
-  if (separator === "\r") return "[char]13";
-  return "[char]10";
-}
-
-/**
- * Keep the agent's typed wrapper out of the user's PSReadLine history.
- *
- * Every wrapper statement is submitted with Enter, so without this the shell
- * records ~17 internal `$__NCMCP_...` lines per agent command. Up/Down then walk
- * history entries the renderer deliberately hides (every line containing
- * `__NCMCP_` is dropped from the display), so history navigation looks dead
- * while Enter still re-runs the recalled wrapper statement. Measured on
- * pwsh 7 / PSReadLine 2.4.5: 18 history entries after a single agent command.
- *
- * Lines stay inside the statement budget and are complete statements:
- *  - `$__NCMCP_p` is the handler that was active before us — the built-in
- *    `Func<string,object>` by default, or the user's own script block. Our
- *    handler calls it for every non-internal line, so the built-in
- *    AddToHistoryOption result and any user handler keep working.
- *  - `$__NCMCP_s` stringifies it: an already-installed Netcatty handler
- *    contains `__NCMCP_` in its source, so re-installing (and nesting the chain
- *    once per job) is skipped.
- *  - Every line carries the reserved `__NCMCP_` prefix, so the renderer hides
- *    the guard's own echo and, once the handler is active, filters these lines
- *    from history too. Only the first job in a shell session records them.
- */
-function powerShellHistoryGuardStatements() {
-  return [
-    "$__NCMCP_p=$(try{(Get-PSReadLineOption).AddToHistoryHandler}catch{})",
-    "$__NCMCP_h={param($l)$l-notmatch'__NCMCP_' -and $__NCMCP_p.Invoke($l)}",
-    "$__NCMCP_s=[string]$__NCMCP_p",
-    "$__NCMCP_d=$__NCMCP_p -and $__NCMCP_s -notmatch'__NCMCP_'",
-    "if($__NCMCP_d){Set-PSReadLineOption -AddToHistoryHandler $__NCMCP_h}",
-  ];
-}
-
-/**
- * Build the PowerShell wrapper as several SHORT physical lines instead of one
- * enormous one.
- *
- * Measured on pwsh 7.6 / PSReadLine 2.4.5 (default Windows edit mode): typing a
- * >1 KB wrapper as a single line makes the line editor wrap it across rows,
- * after which the terminal receives rows whose leading characters were eaten
- * (`>> CMCP_...` where `__NCMCP_...` was expected), a `>> ` continuation row,
- * and prompts interleaved into the command output — the agent's command output
- * ended up missing from the display while the exec protocol still worked.
- *
- * Every line below stays under PS_WRAPPER_MAX_LINE_CHARS and is a COMPLETE
- * statement, so the line editor never enters a continuation state (no `>> `
- * rows at all). Each line also carries the marker, so the renderer's echo
- * filter drops it even if the probe window is not armed. The accumulated text
- * is the unchanged single-line wrapper, executed once by Invoke-Expression, so
- * the `_S`/`_E:<rc>` protocol is untouched.
- */
-function buildPowerShellWrapperLines(wrapperText, marker) {
-  const tag = (/^__NCMCP_([A-Za-z0-9]+)_/.exec(String(marker || "")) || [])[1] || "job";
-  // Job-scoped accumulator: unique per job, and its name keeps `__NCMCP_` in
-  // every typed line for the echo filter.
-  const acc = `$__NCMCP_${tag}`;
-  const statementBudget = Math.max(
-    8,
-    PS_WRAPPER_MAX_LINE_CHARS - `${acc}+=''`.length,
-  );
-  // Initialise first: `+=` on an unset variable is an error under
-  // Set-StrictMode, and profiles do set it.
-  const statements = [...powerShellHistoryGuardStatements(), `${acc}=''`];
-  // Odd indices of a split with a capturing group are the separators.
-  const parts = String(wrapperText ?? "").split(/(\r\n|\n|\r)/);
-  for (let index = 0; index < parts.length; index += 1) {
-    if (index % 2 === 1) {
-      statements.push(`${acc}+=${powerShellNewlineSnippet(parts[index])}`);
-      continue;
-    }
-    for (const chunk of splitPowerShellChunks(parts[index], statementBudget)) {
-      statements.push(`${acc}+='${escapePowerShellSingleQuoted(chunk)}'`);
-    }
-  }
-  statements.push(`Invoke-Expression ${acc}`);
-  // CR only: a LF after Enter leaves PSReadLine in a continuation state, which
-  // renders a ">> " row for every statement (measured on the same pair). Enter
-  // is CR, and the wrapper text's own newlines travel as [char] snippets.
-  return `${statements.join("\r")}\r`;
 }
 
 function bashHistoryScratchNames(marker) {
@@ -418,11 +282,8 @@ function buildWrappedCommand(command, shellKind, marker, separateStartMarker = f
     case "powershell": {
       const psPager = "$env:PAGER='cat'; $env:SYSTEMD_PAGER=''; $env:GIT_PAGER='cat'; $env:LESS=''; ";
       const psEscaped = escapePowerShellSingleQuoted(command);
-      // Typed as short statements, not one >1 KB line: see
-      // buildPowerShellWrapperLines for the measured rendering failure.
-      return buildPowerShellWrapperLines(
-        `$${marker}=0; $${marker}_cmd='${psEscaped}'; & { Write-Output '${marker}_S'; ${psPager}$LASTEXITCODE=$null; try { Invoke-Expression $${marker}_cmd; $${marker}_rc = if ($LASTEXITCODE -ne $null) { $LASTEXITCODE } elseif ($?) { 0 } else { 1 } } catch { $${marker}_rc = 1 }; Write-Output "${marker}_E:$${marker}_rc" }`,
-        marker,
+      return (
+        `$${marker}=0; $${marker}_cmd='${psEscaped}'; & { Write-Output '${marker}_S'; ${psPager}$LASTEXITCODE=$null; try { Invoke-Expression $${marker}_cmd; $${marker}_rc = if ($LASTEXITCODE -ne $null) { $LASTEXITCODE } elseif ($?) { 0 } else { 1 } } catch { $${marker}_rc = 1 }; Write-Output "${marker}_E:$${marker}_rc" }\r\n`
       );
     }
 
@@ -520,43 +381,19 @@ function findEndMarker(outputText, marker, { allowInline = false } = {}) {
   return null;
 }
 
-/** Escape a literal so it can be embedded in a RegExp source. */
-function escapeRegExpLiteral(value) {
-  return String(value ?? "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-/**
- * Job tag shared by every typed wrapper row and by the marker itself
- * (`__NCMCP_<tag>_<hex>__`). Terminal repaints (ConPTY re-emits the visible
- * screen) can push echoed wrapper rows into the capture *after* the start
- * marker, and those rows usually carry only a fragment of the full marker, so
- * a marker-only filter misses them. The tag is always present in one piece.
- */
-function markerTagPrefix(marker) {
-  const match = /^__NCMCP_[A-Za-z0-9]+/.exec(String(marker || ""));
-  return match ? match[0] : null;
-}
-
 function normalizePtyOutput(stdout, {
   stripMarkers = false,
   expectedPrompt = "",
   trimOutput = true,
   stripPrompt = true,
   markerToStrip = null,
-  markerPrefix = null,
 } = {}) {
   let cleaned = stripAnsi(stdout || "").replace(/\r/g, "");
   if (stripMarkers) {
     // Prefer the job-specific marker so user output that contains "__NCMCP_"
-    // (e.g. printf '__NCMCP_demo\n') is preserved. markerPrefix additionally
-    // drops repainted wrapper rows whose marker text was split across rows.
-    const needles = [];
-    if (markerToStrip) needles.push(escapeRegExpLiteral(markerToStrip));
-    if (markerPrefix && markerPrefix !== markerToStrip) {
-      needles.push(escapeRegExpLiteral(markerPrefix));
-    }
-    const pattern = needles.length
-      ? new RegExp(`^[^\\r\\n]*(?:${needles.join("|")})[^\\r\\n]*[\\r\\n]*`, "gm")
+    // (e.g. printf '__NCMCP_demo\n') is preserved.
+    const pattern = markerToStrip
+      ? new RegExp(`^[^\r\n]*${markerToStrip}[^\r\n]*[\r\n]*`, "gm")
       : /^[^\r\n]*__NCMCP_[^\r\n]*[\r\n]*/gm;
     cleaned = cleaned.replace(pattern, "");
   }
@@ -682,16 +519,11 @@ module.exports = {
   hasExpectedPromptSuffix,
   resolveEffectiveShellKind,
   buildPendingInputClearPrefix,
-  pendingInputClearSettleMs,
-  POWERSHELL_CLEAR_SETTLE_MS,
-  PS_WRAPPER_MAX_LINE_CHARS,
-  buildPowerShellWrapperLines,
   buildWrappedCommand,
   buildBashHistoryCleanup,
   bashHistoryScratchNames,
   findEndMarker,
   normalizePtyOutput,
-  markerTagPrefix,
   appendBoundedOutput,
   consumeVisibleText,
   stripAnsi,

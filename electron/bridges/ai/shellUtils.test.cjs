@@ -7,8 +7,6 @@ const {
   extractTrailingIdlePrompt,
   formatSyntheticEcho,
   getFreshIdlePrompt,
-  getShellInputState,
-  resolveShellInputState,
   isDefaultPowerShellPromptLine,
   isDefaultCmdPromptLine,
   isDefaultPosixPromptLine,
@@ -675,70 +673,6 @@ test("getFreshIdlePrompt and trackSessionIdlePrompt round-trip through a real PT
   // The freshness check rescues us: the visible tail no longer ends
   // with the cached PS line, so downstream wrapper selection sees "".
   assert.equal(getFreshIdlePrompt(session), "");
-});
-
-test("getShellInputState separates an idle prompt, pending input and a running command", () => {
-  // Idle: nothing was printed after the prompt.
-  const idle = { lastIdlePrompt: "PS C:\\Users\\alice>", _promptTrackTail: "boot\r\nPS C:\\Users\\alice>" };
-  assert.equal(getShellInputState(idle), "idle");
-
-  // The user typed at the prompt without submitting: safe to clear.
-  const typed = {
-    lastIdlePrompt: "PS C:\\Users\\alice>",
-    _promptTrackTail: "boot\r\nPS C:\\Users\\alice> Get-ChildItem",
-  };
-  assert.equal(getShellInputState(typed), "typed");
-
-  // A foreground command is running (its own output, or the command echo plus
-  // a newline for a silent process like `iperf3 -s`): clearing would kill it.
-  const running = {
-    lastIdlePrompt: "PS C:\\Users\\alice>",
-    _promptTrackTail: "PS C:\\Users\\alice> iperf3 -s\r\n\r\n",
-  };
-  assert.equal(getShellInputState(running), "busy");
-  assert.equal(
-    getShellInputState({
-      lastIdlePrompt: "user@host:~$",
-      _promptTrackTail: "user@host:~$ tail -f app.log\r\n2024-01-01 line\r\n",
-    }),
-    "busy",
-  );
-
-  // Custom prompts are never recognized, and neither is a session with no
-  // captured tail: callers must keep the legacy behaviour instead of guessing.
-  assert.equal(getShellInputState({}), "unknown");
-  assert.equal(getShellInputState(null), "unknown");
-  assert.equal(getShellInputState({ lastIdlePrompt: "PS C:\\>", _promptTrackTail: "" }), "unknown");
-  assert.equal(getShellInputState({ _promptTrackTail: "❯ " }), "unknown");
-});
-
-test("resolveShellInputState waits for a finishing command before refusing", async () => {
-  // A command that just printed its last line: the prompt lands a moment later.
-  const settling = {
-    lastIdlePrompt: "PS C:\\Users\\alice>",
-    _promptTrackTail: "PS C:\\Users\\alice> iperf3 -s\r\n",
-    _promptTrackAt: 0,
-  };
-  assert.equal(getShellInputState(settling), "busy");
-  setTimeout(() => {
-    settling._promptTrackTail = "iperf3 -s\r\n\r\nPS C:\\Users\\alice> ";
-  }, 40);
-  assert.equal(await resolveShellInputState(settling, { waitMs: 400, pollMs: 20 }), "idle");
-
-  // A foreground process that keeps running stays busy for the whole window, so
-  // the caller still refuses instead of sending the clear keystroke.
-  const running = {
-    lastIdlePrompt: "PS C:\\Users\\alice>",
-    _promptTrackTail: "PS C:\\Users\\alice> iperf3 -s\r\n",
-    _promptTrackAt: 0,
-  };
-  assert.equal(await resolveShellInputState(running, { waitMs: 120, pollMs: 20 }), "busy");
-
-  // States that are already safe never wait.
-  const idle = { lastIdlePrompt: "PS C:\\Users\\alice>", _promptTrackTail: "boot\r\nPS C:\\Users\\alice>" };
-  const started = Date.now();
-  assert.equal(await resolveShellInputState(idle, { waitMs: 5_000, pollMs: 20 }), "idle");
-  assert.ok(Date.now() - started < 500);
 });
 
 test("looksLikeIdleAutoLogout detects the bash TMOUT banner at the tail", () => {

@@ -1,7 +1,6 @@
 import type { Terminal as XTerm } from "@xterm/xterm";
 import {
-  followTerminalOutputIfAtBottom,
-  isTerminalViewportAtBottom,
+  scrollTerminalToBottomIfNeeded,
   shouldScrollOnTerminalOutput,
 } from "../../../domain/terminalScroll";
 import { logger } from "../../../lib/logger";
@@ -126,14 +125,6 @@ const isTerminalOutputVisibleForPressure = (ctx: TerminalSessionStartersContext)
   isTerminalPaneVisible(ctx) && !isTerminalPageHidden()
 );
 
-/**
- * Output-driven auto-scroll ("Scroll on output").
- *
- * A visible pane is left to xterm's own sticky-bottom behavior: following the
- * tail keeps working, while a viewport parked in scrollback stays there so past
- * output can be read. Only a hidden pane records a pending scroll for its next
- * reveal, and only while it was still following the tail.
- */
 const handleTerminalOutputAutoScroll = (
   ctx: TerminalSessionStartersContext,
   term: XTerm,
@@ -144,26 +135,18 @@ const handleTerminalOutputAutoScroll = (
   }
 
   if (!isTerminalPaneVisible(ctx)) {
-    notePendingOutputScrollIfEnabled(ctx, term);
+    notePendingOutputScrollIfEnabled(ctx);
     return;
   }
 
-  followTerminalOutputIfAtBottom(term);
+  scrollTerminalToBottomIfNeeded(term);
 };
 
-/**
- * Hidden-pane output asks for one scroll when the pane is revealed again. Only
- * a viewport that was still following the tail qualifies: a reader parked in
- * scrollback keeps that position across the reveal (#1985 covers the follow
- * case).
- */
 export const notePendingOutputScrollIfEnabled = (
   ctx: TerminalSessionStartersContext,
-  term?: XTerm,
 ): void => {
   const settings = ctx.terminalSettingsRef?.current ?? ctx.terminalSettings;
   if (!shouldScrollOnTerminalOutput(settings)) return;
-  if (term && !isTerminalViewportAtBottom(term)) return;
   if (ctx.pendingOutputScrollRef) {
     ctx.pendingOutputScrollRef.current = true;
   }
@@ -936,7 +919,7 @@ export const attachSessionToTerminal = (
       ctx.updateStatus("connected");
       setTimeout(() => {
         if (ctx.isVisibleRef?.current === false) {
-          notePendingOutputScrollIfEnabled(ctx, term);
+          notePendingOutputScrollIfEnabled(ctx);
           return;
         }
         if (!ctx.fitAddonRef.current) return;

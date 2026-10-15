@@ -50,8 +50,6 @@ const {
   isPlausibleCliVersionOutput,
   getShellEnv,
   getFreshIdlePrompt,
-  getShellInputState,
-  resolveShellInputState,
   invalidateShellEnvCache,
   toUnpackedAsarPath,
 } = require("./ai/shellUtils.cjs");
@@ -899,8 +897,6 @@ function createHandlerContext(ipcMain) {
     isPlausibleCliVersionOutput,
     getShellEnv,
     getFreshIdlePrompt,
-    getShellInputState,
-    resolveShellInputState,
     invalidateShellEnvCache,
     toUnpackedAsarPath,
     detectClaudeAuthPresence,
