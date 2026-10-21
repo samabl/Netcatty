@@ -77,8 +77,56 @@ function escapeFishSingleQuoted(text) {
   return String(text || "").replace(/\\/g, "\\\\").replace(/'/g, "\\'");
 }
 
-function escapeCmdForNestedShell(text) {
-  return String(text || "").replace(/"/g, '""').replace(/%/g, "%%");
+// cmd.exe parses the typed prompt line before the user's command reaches a
+// nested shell: `%VAR%` expands, and `& | < > ( )` split the line. An
+// environment variable plus `call` applies percent expansion twice (measured:
+// `echo 50%PATH%` returned `50%<PATH>%`) and cannot protect quoted
+// metacharacters (`echo "a & b"` split at the `&`). Instead, escape every
+// character the OUTER parser treats specially with `^`; the outer parse strips
+// only the carets, and the nested `cmd /d /s /c` applies native cmd expansion
+// exactly once. Newlines become `&` (blank prompt lines are no-ops).
+function escapeCmdLineForOuterParse(line) {
+  let escaped = "";
+  for (const ch of String(line ?? "")) {
+    if (ch === "^") {
+      escaped += "^^";
+    } else if ('&|<>()"!%'.includes(ch)) {
+      escaped += `^${ch}`;
+    } else {
+      escaped += ch;
+    }
+  }
+  return escaped;
+}
+
+function buildPowerShellChildScript(command, marker) {
+  // The command runs in a child PowerShell so `exit` cannot close the user's
+  // interactive session (the POSIX wrapper uses a subshell for the same
+  // reason). It also keeps PowerShell's error context from quoting the typed
+  // wrapper. -NoProfile makes the result deterministic; the tool contract
+  // already says shell state does not persist between calls.
+  return [
+    `$env:PAGER='cat'; $env:SYSTEMD_PAGER=''; $env:GIT_PAGER='cat'; $env:LESS=''`,
+    `$${marker}_err=$Error.Count`,
+    String(command ?? ""),
+    // A trailing backtick/comment must not consume the status probe.
+    "",
+    `$${marker}_ok=$?`,
+    `$${marker}_code=$LASTEXITCODE`,
+    `if ($null -ne $${marker}_code) { exit $${marker}_code }`,
+    `if ($Error.Count -gt $${marker}_err) { exit 1 }`,
+    `if (-not $${marker}_ok) { exit 1 }`,
+    `exit 0`,
+  ].join("\n");
+}
+
+function escapeCmdForNestedShell(command) {
+  return String(command ?? "")
+    .replace(/\r\n?/g, "\n")
+    .split("\n")
+    .filter((line) => line.trim().length > 0)
+    .map(escapeCmdLineForOuterParse)
+    .join(" ^& ");
 }
 
 // Matches PowerShell's default prompt only (e.g. `PS C:\Users\alice>`,
@@ -188,16 +236,104 @@ function buildPendingInputClearPrefix(shellKind) {
     case "cmd":
       return "\x1b";
     case "powershell":
-      // Vi gg plus a counted dd removes the whole multiline buffer, including
-      // in PSReadLine 2.0 where dG is unavailable. Escape+r is Emacs
-      // RevertLine. Repeated Escape clears Windows mode, and the final
-      // i+Backspace leaves every mode on an empty editable line.
-      return "\x1bggd2147483647d\x1br\x1b\x1bi\x08";
+      // Ctrl+C ("abandon the current line") is the only PowerShell binding that
+      // holds in every PSReadLine edit mode. The previous Escape/vi hybrid
+      // only cleared Emacs mode and inserted leftover bytes as literals in the
+      // default Windows mode. On an empty prompt it is a silent no-op. It must
+      // be delivered as its own keystroke — see pendingInputClearSettleMs.
+      return "\x03";
     default:
       // Kill the suffix before the prefix. Canonical/no-editing terminals do
       // not bind Ctrl+K; the trailing Ctrl+U must erase that literal byte too.
       return "\x0b\x15";
   }
+}
+
+// PowerShell's clear is an edit-mode keystroke, not text: written in the same
+// chunk as the wrapper, the line editor consumes the wrapper as part of the
+// same key sequence and the command never runs. Give it its own write and let
+// it settle before typing the wrapper.
+const POWERSHELL_CLEAR_SETTLE_MS = 120;
+
+function pendingInputClearSettleMs(shellKind) {
+  return shellKind === "powershell" ? POWERSHELL_CLEAR_SETTLE_MS : 0;
+}
+
+// Longest physical input line the PowerShell wrapper may type. Real terminals
+// can be narrower, but every line is a complete statement, so a narrower pane
+// only costs an extra row — never a line-editor continuation.
+const PS_WRAPPER_MAX_LINE_CHARS = 72;
+
+/**
+ * Split text into code-point-safe pieces whose single-quoted PowerShell escape
+ * fits the statement budget. Iterating a string yields whole code points, so a
+ * surrogate pair never lands on a chunk boundary; quoting cost is charged per
+ * character because `'` doubles.
+ */
+function splitPowerShellChunks(text, budget) {
+  const chunks = [];
+  let current = "";
+  let used = 0;
+  for (const ch of String(text ?? "")) {
+    const cost = ch === "'" ? 2 : ch.length;
+    if (current && used + cost > budget) {
+      chunks.push(current);
+      current = "";
+      used = 0;
+    }
+    current += ch;
+    used += cost;
+  }
+  if (current) chunks.push(current);
+  return chunks;
+}
+
+function powerShellNewlineSnippet(separator) {
+  if (separator === "\r\n") return "[char]13+[char]10";
+  if (separator === "\r") return "[char]13";
+  return "[char]10";
+}
+
+/**
+ * Build the PowerShell wrapper as several SHORT physical lines instead of one
+ * enormous one. A >1 KB single line is wrapped by PSReadLine across rows; the
+ * echoed rows lose their leading characters, spawn ">> " continuation rows,
+ * and interleave prompts into the command output (the command output itself
+ * can go missing from the display).
+ *
+ * Every line stays under PS_WRAPPER_MAX_LINE_CHARS and is a COMPLETE
+ * statement, so the line editor never enters a continuation state. Each line
+ * carries the marker, so the renderer's echo filter drops it. The accumulated
+ * text is the unchanged single-line wrapper, executed once by
+ * Invoke-Expression, so the `_S`/`_E:<rc>` protocol is untouched.
+ */
+function buildPowerShellWrapperLines(wrapperText, marker) {
+  const tag = (/^__NCMCP_([A-Za-z0-9]+)_/.exec(String(marker || "")) || [])[1] || "job";
+  // Job-scoped accumulator: unique per job, and its name keeps `__NCMCP_` in
+  // every typed line for the echo filter.
+  const acc = `$__NCMCP_${tag}`;
+  const statementBudget = Math.max(
+    8,
+    PS_WRAPPER_MAX_LINE_CHARS - `${acc}+=''`.length,
+  );
+  // Initialise first: `+=` on an unset variable is an error under
+  // Set-StrictMode, and profiles do set it.
+  const statements = [`${acc}=''`];
+  // Odd indices of a split with a capturing group are the separators.
+  const parts = String(wrapperText ?? "").split(/(\r\n|\n|\r)/);
+  for (let index = 0; index < parts.length; index += 1) {
+    if (index % 2 === 1) {
+      statements.push(`${acc}+=${powerShellNewlineSnippet(parts[index])}`);
+      continue;
+    }
+    for (const chunk of splitPowerShellChunks(parts[index], statementBudget)) {
+      statements.push(`${acc}+='${escapePowerShellSingleQuoted(chunk)}'`);
+    }
+  }
+  statements.push(`Invoke-Expression ${acc}`);
+  // CR only: a LF after Enter leaves PSReadLine in a continuation state, which
+  // renders a ">> " row for every statement.
+  return `${statements.join("\r")}\r`;
 }
 
 function bashHistoryScratchNames(marker) {
@@ -280,17 +416,23 @@ function buildWrappedCommand(command, shellKind, marker, separateStartMarker = f
   const startFormat = separateStartMarker ? "\\n%s\\n" : "%s\\n";
   switch (shellKind) {
     case "powershell": {
-      const psPager = "$env:PAGER='cat'; $env:SYSTEMD_PAGER=''; $env:GIT_PAGER='cat'; $env:LESS=''; ";
-      const psEscaped = escapePowerShellSingleQuoted(command);
-      return (
-        `$${marker}=0; $${marker}_cmd='${psEscaped}'; & { Write-Output '${marker}_S'; ${psPager}$LASTEXITCODE=$null; try { Invoke-Expression $${marker}_cmd; $${marker}_rc = if ($LASTEXITCODE -ne $null) { $LASTEXITCODE } elseif ($?) { 0 } else { 1 } } catch { $${marker}_rc = 1 }; Write-Output "${marker}_E:$${marker}_rc" }\r\n`
+      // Run the user's command in a child PowerShell: `exit` inside the
+      // command must not close the interactive session, and PowerShell's
+      // error display must reference the user's script rather than the typed
+      // wrapper. The child inherits the console, so output stays live and
+      // interactive programs still work. See buildPowerShellChildScript.
+      const childScript = buildPowerShellChildScript(command, marker);
+      const encoded = Buffer.from(childScript, "utf16le").toString("base64");
+      return buildPowerShellWrapperLines(
+        `$${marker}=0; & { Write-Output '${marker}_S'; $global:LASTEXITCODE=$null; & ([Diagnostics.Process]::GetCurrentProcess().Path) -NoProfile -NonInteractive -EncodedCommand ${encoded}; $${marker}_rc=$global:LASTEXITCODE; if ($null -eq $${marker}_rc) { $${marker}_rc=1 }; Write-Output "${marker}_E:$${marker}_rc" }`,
+        marker,
       );
     }
 
     case "cmd": {
       const cmdEscaped = escapeCmdForNestedShell(command);
       return (
-        `set "${marker}=0" & set "${marker}_CMD=${cmdEscaped}" & (echo ${marker}_S & set "PAGER=cat" & set "SYSTEMD_PAGER=" & set "GIT_PAGER=cat" & set "LESS=" & call cmd /d /s /c "%${marker}_CMD%" & call echo ${marker}_E:^%errorlevel^%)\r\n`
+        `set "${marker}=0" & (echo ${marker}_S & set "PAGER=cat" & set "SYSTEMD_PAGER=" & set "GIT_PAGER=cat" & set "LESS=" & cmd /d /s /c ${cmdEscaped} & call echo ${marker}_E:^%errorlevel^%)\r\n`
       );
     }
 
@@ -381,19 +523,43 @@ function findEndMarker(outputText, marker, { allowInline = false } = {}) {
   return null;
 }
 
+/** Escape a literal so it can be embedded in a RegExp source. */
+function escapeRegExpLiteral(value) {
+  return String(value ?? "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * Job tag shared by every typed wrapper row and by the marker itself
+ * (`__NCMCP_<tag>_<hex>__`). ConPTY repaints can re-emit echoed wrapper rows
+ * *after* the start marker, and a row wrapped mid-marker then carries only a
+ * fragment of the full marker, so a marker-only filter misses it. The tag is
+ * always present in one piece.
+ */
+function markerTagPrefix(marker) {
+  const match = /^__NCMCP_[A-Za-z0-9]+/.exec(String(marker || ""));
+  return match ? match[0] : null;
+}
+
 function normalizePtyOutput(stdout, {
   stripMarkers = false,
   expectedPrompt = "",
   trimOutput = true,
   stripPrompt = true,
   markerToStrip = null,
+  markerPrefix = null,
 } = {}) {
   let cleaned = stripAnsi(stdout || "").replace(/\r/g, "");
   if (stripMarkers) {
     // Prefer the job-specific marker so user output that contains "__NCMCP_"
-    // (e.g. printf '__NCMCP_demo\n') is preserved.
-    const pattern = markerToStrip
-      ? new RegExp(`^[^\r\n]*${markerToStrip}[^\r\n]*[\r\n]*`, "gm")
+    // (e.g. printf '__NCMCP_demo\n') is preserved. markerPrefix additionally
+    // drops repainted wrapper rows whose marker text was split across rows.
+    const needles = [];
+    if (markerToStrip) needles.push(escapeRegExpLiteral(markerToStrip));
+    if (markerPrefix && markerPrefix !== markerToStrip) {
+      needles.push(escapeRegExpLiteral(markerPrefix));
+    }
+    const pattern = needles.length
+      ? new RegExp(`^[^\\r\\n]*(?:${needles.join("|")})[^\\r\\n]*[\\r\\n]*`, "gm")
       : /^[^\r\n]*__NCMCP_[^\r\n]*[\r\n]*/gm;
     cleaned = cleaned.replace(pattern, "");
   }
@@ -519,11 +685,16 @@ module.exports = {
   hasExpectedPromptSuffix,
   resolveEffectiveShellKind,
   buildPendingInputClearPrefix,
+  pendingInputClearSettleMs,
+  POWERSHELL_CLEAR_SETTLE_MS,
+  PS_WRAPPER_MAX_LINE_CHARS,
+  buildPowerShellWrapperLines,
   buildWrappedCommand,
   buildBashHistoryCleanup,
   bashHistoryScratchNames,
   findEndMarker,
   normalizePtyOutput,
+  markerTagPrefix,
   appendBoundedOutput,
   consumeVisibleText,
   stripAnsi,

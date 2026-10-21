@@ -21,6 +21,7 @@ const {
   expandWindowsEnvRefs,
   mergeWindowsPath,
   readWindowsRegistryPath,
+  stripAnsi,
   trackSessionIdlePrompt,
 } = require("./shellUtils.cjs");
 const fs = require("node:fs");
@@ -36,6 +37,21 @@ test("formatSyntheticEcho normalizes multi-line commands to CRLF so xterm doesn'
   assert.equal(formatSyntheticEcho("a\r\nb"), "a\r\nb\r\n");
   // Single-line commands keep the original shape.
   assert.equal(formatSyntheticEcho("npm test"), "npm test\r\n");
+});
+
+test("stripAnsi removes each OSC separately and keeps the text between them", () => {
+  const st = "\u001b\\";
+  // cmd.exe rewrites the window title before/after every executed statement.
+  // A greedy OSC pattern would drop "first output" and "second output" too.
+  assert.equal(
+    stripAnsi(`\u001b]0;title one${st}first output\r\n\u001b]0;title two${st}second output\r\n`),
+    "first output\r\nsecond output\r\n",
+  );
+  assert.equal(stripAnsi("a\u001b]0;title\u0007b"), "ab");
+  // A title cut off by a capture boundary must not leak into the output.
+  assert.equal(stripAnsi("keep\u001b]0;partial title"), "keep");
+  // CSI sequences still strip independently.
+  assert.equal(stripAnsi("\u001b[?7lhello\u001b[?7h"), "hello");
 });
 
 test("extracts a trailing PowerShell idle prompt", () => {

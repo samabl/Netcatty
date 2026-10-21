@@ -13,7 +13,12 @@ const path = require("node:path");
 // ── ANSI / URL regexes ──
 
 const ANSI_ESCAPE_REGEX = /\u001B\[[0-?]*[ -/]*[@-~]/g;
-const ANSI_OSC_REGEX = /\u001B\][^\u0007]*(?:\u0007|\u001B\\)/g;
+// Lazy payload: a greedy `[^\u0007]*` spans from the first OSC opener to the
+// *last* ST terminator in the string, swallowing every byte between separate
+// OSC sequences (cmd.exe emits one title OSC per executed statement, so command
+// output between them disappeared). Stop at the first BEL/ST; an unterminated
+// trailing OSC (a title cut by the capture boundary) is dropped as well.
+const ANSI_OSC_REGEX = /\u001B\](?:[^\u0007]*?(?:\u0007|\u001B\\)|[^\u0007]*$)/g;
 const URL_CANDIDATE_REGEX = /https?:\/\/[^\s]+/g;
 const WINDOWS_RUNNABLE_EXTENSIONS = [".exe", ".cmd", ".bat", ".com"];
 const MAX_PROMPT_TRACK_TAIL = 4096;

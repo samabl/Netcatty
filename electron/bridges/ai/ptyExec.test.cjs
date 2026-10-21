@@ -16,7 +16,11 @@ const {
 } = require("./ptyExec.cjs");
 const {
   buildPendingInputClearPrefix,
+  pendingInputClearSettleMs,
   buildWrappedCommand,
+  normalizePtyOutput,
+  markerTagPrefix,
+  PS_WRAPPER_MAX_LINE_CHARS,
 } = require("./ptyExecHelpers.cjs");
 const {
   getFreshIdlePrompt,
@@ -36,6 +40,25 @@ class ShellBackedPty extends EventEmitter {
 
 function markerFromWrite(data) {
   return String(data).match(/(__NCMCP_[a-z0-9]+_[0-9a-f]+__)/i)?.[1] || null;
+}
+
+/**
+ * PowerShell clears pending input on its own keystroke first, then types the
+ * wrapper after a settle window. The wrapper is split into short statements, so
+ * the full marker can span writes — match the job accumulator instead.
+ */
+async function waitForMarkerWrite(writes, marker, timeoutMs = 2000) {
+  const tag = /^__NCMCP_([A-Za-z0-9]+)_/.exec(marker)?.[1];
+  const accumulator = tag ? `__NCMCP_${tag}+=` : null;
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const match = writes.find((write) => (
+      write.includes(marker) || (accumulator && write.includes(accumulator))
+    ));
+    if (match) return match;
+    if (Date.now() > deadline) assert.fail(`timed out waiting for a pty write carrying ${marker}`);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
 }
 
 test("execViaPty completes when command output has no trailing newline", async () => {
@@ -367,9 +390,19 @@ test("loginShellHint selects fish/posix/powershell/cmd without pinning confirmed
 test("pending-input clear prefix covers interactive shells and skips raw devices", () => {
   assert.equal(buildPendingInputClearPrefix("posix"), "\x0b\x15");
   assert.equal(buildPendingInputClearPrefix("fish"), "\x0b\x15");
-  assert.equal(buildPendingInputClearPrefix("powershell"), "\x1bggd2147483647d\x1br\x1b\x1bi\x08");
+  // Ctrl+C is the only PowerShell binding that clears the line in every
+  // PSReadLine edit mode; the old Escape/vi hybrid silently failed in the
+  // default Windows edit mode and inserted its leftover bytes as literals.
+  assert.equal(buildPendingInputClearPrefix("powershell"), "\x03");
   assert.equal(buildPendingInputClearPrefix("cmd"), "\x1b");
   assert.equal(buildPendingInputClearPrefix("raw"), "");
+});
+
+test("only PowerShell needs the clear keystroke delivered on its own", () => {
+  assert.ok(pendingInputClearSettleMs("powershell") > 0);
+  assert.equal(pendingInputClearSettleMs("posix"), 0);
+  assert.equal(pendingInputClearSettleMs("cmd"), 0);
+  assert.equal(pendingInputClearSettleMs("raw"), 0);
 });
 
 test("consecutive jobs wait for the PowerShell prompt after a split end marker", async () => {
@@ -391,7 +424,8 @@ test("consecutive jobs wait for the PowerShell prompt after a split end marker",
       timeoutMs: 20,
       expectedPrompt: getFreshIdlePrompt(session),
     });
-    const write = writes.at(-1);
+    assert.equal(writes[0], "\x03");
+    const write = await waitForMarkerWrite(writes, job.marker);
     assert.match(write, /\$__NCMCP_/);
     assert.doesNotMatch(write, /cmd \/d \/s \/c/i);
 
@@ -446,11 +480,13 @@ test("cancel retries stop after an end marker while the prompt is delayed", asyn
     expectedPrompt: "PS C:\\Users\\alice>",
   });
   job.cancel();
-  assert.equal(writes.filter((write) => write === "\x03").length, 1);
+  // The pending-input clear is Ctrl+C as well, so count interrupts beyond it.
+  const clears = 1;
+  assert.equal(writes.filter((write) => write === "\x03").length, clears + 1);
 
   pty.emit("data", Buffer.from(`${job.marker}_S\r\n${job.marker}_E:130\r\n`));
   await new Promise((resolve) => setTimeout(resolve, 200));
-  assert.equal(writes.filter((write) => write === "\x03").length, 1);
+  assert.equal(writes.filter((write) => write === "\x03").length, clears + 1);
 
   pty.emit("data", Buffer.from("PS C:\\Users\\alice>"));
   const result = await job.resultPromise;
@@ -487,7 +523,8 @@ test("cancelled output strips an end marker delivered with the prompt", async ()
   assert.equal(result.stdout, "");
   assert.doesNotMatch(result.stdout, /__NCMCP_/);
   await new Promise((resolve) => setTimeout(resolve, 200));
-  assert.equal(writes.filter((write) => write === "\x03").length, 1);
+  // One leading pending-input clear plus the single cancel interrupt.
+  assert.equal(writes.filter((write) => write === "\x03").length, 2);
 });
 
 test("cancel after an end marker keeps waiting without interrupting the prompt", async () => {
@@ -511,7 +548,9 @@ test("cancel after an end marker keeps waiting without interrupting the prompt",
   job.resultPromise.then(() => { settled = true; });
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(settled, false);
-  assert.equal(writes.filter((write) => write === "\x03").length, 0);
+  // Only the leading pending-input clear, never an interrupt for the prompt.
+  assert.equal(writes[0], "\x03");
+  assert.equal(writes.filter((write) => write === "\x03").length, 1);
 
   pty.emit("data", Buffer.from("PS C:\\Users\\alice>"));
   const result = await job.resultPromise;
@@ -586,7 +625,11 @@ test("a foreground wall deadline returns on time but blocks writes until the pro
   assert.equal(firstResult.ok, true);
   assert.equal(firstResult.exitCode, 0);
   assert.equal(firstResult.stdout, "DONE");
-  assert.equal(writes.filter((write) => write === "\x03").length, 0);
+  // The leading pending-input clear is the only Ctrl+C this job sends. The job
+  // finished on the end marker, so its settled wrapper write is never sent.
+  assert.equal(writes[0], "\x03");
+  assert.equal(writes.filter((write) => write === "\x03").length, 1);
+  const writesAfterFirstJob = writes.length;
 
   assert.throws(
     () => startPtyJob(pty, "Write-Output 'TOO_EARLY'", {
@@ -600,7 +643,7 @@ test("a foreground wall deadline returns on time but blocks writes until the pro
       && /waiting for the shell prompt/i.test(error.message)
     ),
   );
-  assert.equal(writes.length, 1);
+  assert.equal(writes.length, writesAfterFirstJob);
 
   pty.emit("data", Buffer.from("PS C:\\Users\\alice>"));
   const second = startPtyJob(pty, "Write-Output 'NEXT'", {
@@ -609,7 +652,7 @@ test("a foreground wall deadline returns on time but blocks writes until the pro
     timeoutMs: 1000,
     expectedPrompt: getFreshIdlePrompt(session),
   });
-  const secondWrite = writes.at(-1);
+  const secondWrite = await waitForMarkerWrite(writes, second.marker);
   assert.match(secondWrite, /\$__NCMCP_/);
   assert.doesNotMatch(secondWrite, /cmd \/d \/s \/c/i);
   pty.emit(
@@ -619,7 +662,8 @@ test("a foreground wall deadline returns on time but blocks writes until the pro
   const secondResult = await second.resultPromise;
   assert.equal(secondResult.ok, true);
   assert.equal(secondResult.stdout, "NEXT");
-  assert.equal(writes.filter((write) => write === "\x03").length, 0);
+  // One pending-input clear per job, and no interrupt for either command.
+  assert.equal(writes.filter((write) => write === "\x03").length, 2);
 });
 
 test("startPtyJob clears PowerShell input in Windows, Emacs, and Vi editor states", async () => {
@@ -654,6 +698,15 @@ test("startPtyJob clears PowerShell input in Windows, Emacs, and Vi editor state
     }
 
     applyEditKey(key) {
+      // Ctrl+C abandons the line in every PSReadLine edit mode.
+      if (key === "\x03") {
+        this.pendingInput = "";
+        this.cursor = 0;
+        this.viChord = "";
+        this.viChordDigits = "";
+        this.emacsChord = false;
+        return;
+      }
       if (this.editMode === "windows") {
         if (key === "\x1b") {
           this.pendingInput = "";
@@ -763,17 +816,17 @@ test("startPtyJob clears PowerShell input in Windows, Emacs, and Vi editor state
       this.writes.push(text);
 
       const clearPrefix = buildPendingInputClearPrefix("powershell");
-      assert.ok(text.startsWith(clearPrefix));
-      for (const key of clearPrefix) this.applyEditKey(key);
-      const wrapper = text.slice(clearPrefix.length);
-      const submittedLine = this.viInsertMode
-        ? `${this.pendingInput.slice(0, this.cursor)}${wrapper}${this.pendingInput.slice(this.cursor)}`
-        : this.pendingInput;
+      if (text === clearPrefix) {
+        for (const key of clearPrefix) this.applyEditKey(key);
+        return;
+      }
+      const submittedLine = `${this.pendingInput.slice(0, this.cursor)}${text}${this.pendingInput.slice(this.cursor)}`;
       this.submittedLines.push(submittedLine);
       this.pendingInput = "";
       this.cursor = 0;
 
-      const marker = submittedLine.match(/__NCMCP_[0-9a-z]+_[0-9a-f]+__/)?.[0];
+      const marker = this.expectedMarker
+        || submittedLine.match(/__NCMCP_[0-9a-z]+_[0-9a-f]+__/)?.[0];
       assert.ok(marker);
       queueMicrotask(() => {
         this.emit("data", Buffer.from(`${marker}_S\r\n${marker}_E:0\r\nPS C:\\Users\\alice>`));
@@ -820,13 +873,13 @@ test("startPtyJob clears PowerShell input in Windows, Emacs, and Vi editor state
         timeoutMs: 50,
         expectedPrompt: "PS C:\\Users\\alice>",
       });
+      pty.expectedMarker = job.marker;
       await job.resultPromise;
     }
 
-    assert.equal(pty.writes.length, 2);
+    assert.equal(pty.writes.filter((write) => write === "\x03").length, 2);
     assert.equal(pty.submittedLines.length, 2);
-    for (const [index, submittedLine] of pty.submittedLines.entries()) {
-      assert.ok(pty.writes[index].startsWith("\x1bggd2147483647d\x1br\x1b\x1bi\x08$__NCMCP_"));
+    for (const submittedLine of pty.submittedLines) {
       assert.ok(submittedLine.startsWith("$__NCMCP_"));
       assert.doesNotMatch(submittedLine, /Write-Output 'USER'/);
       assert.doesNotMatch(submittedLine, /Write-Output 'USER_SECOND'/);
@@ -874,10 +927,106 @@ test("execViaRawPty does not prepend a line-clear before device commands", async
   assert.equal(result.ok, false);
 });
 
-test("cmd wrapper uses interactive cmd variable expansion", () => {
-  const wrapped = buildWrappedCommand("ipconfig /all", "cmd", "__NCMCP_TEST__");
-  assert.match(wrapped, /"%__NCMCP_TEST___CMD%"/);
-  assert.doesNotMatch(wrapped, /"%%__NCMCP_TEST___CMD%%"/);
+test("cmd wrapper escapes cmd metacharacters for the outer prompt parse", () => {
+  const command = 'echo 50%PATH% & echo "a & b"';
+  const wrapped = buildWrappedCommand(command, "cmd", "__NCMCP_TEST__");
+  // The outer interactive cmd must not expand %PATH% or split quoted text at
+  // the &; the nested cmd receives the original text after caret removal.
+  assert.match(wrapped, /cmd \/d \/s \/c echo 50\^%PATH\^%/);
+  assert.match(wrapped, /\^"a \^& b\^"/);
+  assert.doesNotMatch(wrapped, /powershell|pwsh/i);
+  // The completion marker still comes from the outer cmd so it is emitted even
+  // when the user command fails to start.
+  assert.match(wrapped, /_S/);
+  assert.match(wrapped, /_E:\^%errorlevel\^%/);
+});
+
+test("cmd wrapper turns newlines into command separators", () => {
+  const wrapped = buildWrappedCommand("echo one\necho two", "cmd", "__NCMCP_TEST__");
+  assert.match(wrapped, /cmd \/d \/s \/c echo one \^& echo two/);
+});
+
+test("PowerShell wrapper is typed as short statements that cannot wrap", () => {
+  const marker = "__NCMCP_mwrap001_deadbeefdeadbeefdeadbeefdeadbeef__";
+  const command = `Write-Output "first";\n"${"y".repeat(240)}"; $x = '${"'".repeat(12)}'; Get-ChildItem 'C:\\Program Files'`;
+  const wrapped = buildWrappedCommand(command, "powershell", marker);
+  const lines = wrapped.split("\r").filter(Boolean);
+
+  assert.ok(lines.length > 4, `expected several statements, got ${lines.length}`);
+  const tag = /^__NCMCP_([A-Za-z0-9]+)_/.exec(marker)[1];
+  const accumulator = `$__NCMCP_${tag}`;
+  for (const line of lines) {
+    assert.ok(
+      line.length <= PS_WRAPPER_MAX_LINE_CHARS,
+      `statement exceeds the line budget (${line.length}): ${line}`,
+    );
+    assert.doesNotMatch(line, /[\r\n]/, "a statement must never contain a raw newline");
+    assert.ok(
+      line.includes("__NCMCP_") || line.startsWith("Invoke-Expression"),
+      `statement must carry the marker for the echo filter: ${line}`,
+    );
+  }
+  assert.equal(lines.at(-1), `Invoke-Expression ${accumulator}`);
+
+  // Replay the accumulation the way the shell does: the reconstructed text must
+  // contain the original command exactly (including escaped quotes/newlines).
+  let accumulated = "";
+  for (const line of lines.slice(0, -1)) {
+    if (line === `${accumulator}=''`) continue;
+    const assignment = new RegExp(`^\\${accumulator}\\+=(.*)$`).exec(line);
+    assert.ok(assignment, `unexpected statement: ${line}`);
+    const expression = assignment[1];
+    const newline = /^\[char\](13|10)(?:\+\[char\](13|10))?$/.exec(expression);
+    if (newline) {
+      accumulated += String.fromCharCode(Number(newline[1]));
+      if (newline[2]) accumulated += String.fromCharCode(Number(newline[2]));
+      continue;
+    }
+    assert.match(expression, /^'.*'$/s, `statement must append a quoted literal: ${line}`);
+    accumulated += expression.slice(1, -1).replace(/''/g, "'");
+  }
+  assert.ok(
+    accumulated.includes("-EncodedCommand "),
+    "the wrapper must run the command in a child PowerShell",
+  );
+  const encodedMatch = /-EncodedCommand ([A-Za-z0-9+/=]+)/.exec(accumulated);
+  assert.ok(encodedMatch, "encoded child script must survive chunking");
+  const childScript = Buffer.from(encodedMatch[1], "base64").toString("utf16le");
+  assert.ok(
+    childScript.includes(command),
+    "the decoded child script must carry the user command verbatim",
+  );
+  assert.match(childScript, /exit \$LASTEXITCODE|exit 1/);
+  assert.ok(accumulated.includes(`${marker}_S`), "start marker must survive chunking");
+  assert.ok(accumulated.includes(`${marker}_E:$`), "end marker must survive chunking");
+});
+
+test("normalizePtyOutput drops repainted wrapper rows by job tag", () => {
+  const marker = "__NCMCP_tag123_abcdef012345__";
+  assert.equal(markerTagPrefix(marker), "__NCMCP_tag123");
+  const stdout = [
+    "real output",
+    "__NCMCP_tag123_cmd='echo hi'", // repaint truncated before the full marker
+    "more output",
+    `${marker}_E:0`,
+  ].join("\r\n");
+  assert.equal(
+    normalizePtyOutput(stdout, {
+      stripMarkers: true,
+      markerToStrip: marker,
+      markerPrefix: markerTagPrefix(marker),
+    }),
+    "real output\nmore output",
+  );
+  // User output that merely mentions "__NCMCP_" is not part of this job's tag.
+  assert.equal(
+    normalizePtyOutput("printf __NCMCP_demo\n", {
+      stripMarkers: true,
+      markerToStrip: marker,
+      markerPrefix: markerTagPrefix(marker),
+    }),
+    "printf __NCMCP_demo",
+  );
 });
 
 // Issue #1850: agent-generated commands run inside a subshell so that

@@ -453,6 +453,15 @@ test("worker exec keeps shell-selected defaults: powershell frees $(), dangerous
     commandTimeoutMs: 300,
   });
   await nextTick();
+  // PowerShell delivers the pending-input clear as its own keystroke, then
+  // types the wrapper after a short settle window.
+  const wrapperDeadline = Date.now() + 2000;
+  while (
+    !pty.writes.some((entry) => entry.includes("__NCMCP_") && !entry.includes("command sh -c"))
+    && Date.now() < wrapperDeadline
+  ) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
   assert.ok(
     pty.writes.some((entry) => entry.includes("__NCMCP_") && !entry.includes("command sh -c")),
     "expected the unblocked command to reach the PTY",

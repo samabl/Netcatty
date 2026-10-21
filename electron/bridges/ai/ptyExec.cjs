@@ -19,9 +19,11 @@ const {
   hasExpectedPromptSuffix,
   resolveEffectiveShellKind,
   buildPendingInputClearPrefix,
+  pendingInputClearSettleMs,
   buildWrappedCommand,
   findEndMarker,
   normalizePtyOutput,
+  markerTagPrefix,
   appendBoundedOutput,
   consumeVisibleText,
   stripAnsi,
@@ -75,8 +77,14 @@ function startPtyJob(ptyStream, command, options) {
   let resolvedShellKind = resolveEffectiveShellKind(shellKind, expectedPrompt, {
     loginShellHint,
   });
-  const waitForReturnedPrompt = loginShellHint === "cmd"
-    && resolvedShellKind === "powershell"
+  // Wait for the idle prompt after the end marker on PowerShell sessions whose
+  // prompt was already observed: the marker is printed just before the wrapper
+  // block closes, and resolving immediately lets the next job's Ctrl+C
+  // interrupt that tail. That leaves PSReadLine at a ">> " continuation, so the
+  // following wrapper is typed into a broken line and never emits its marker.
+  // The Windows OpenSSH cmd-to-PowerShell startup path needs the same wait so a
+  // consecutive command cannot fall back to cmd.exe.
+  const waitForReturnedPrompt = resolvedShellKind === "powershell"
     && Boolean(expectedPrompt);
   if (promptRecoveryPendingPtys.has(ptyStream)) {
     if (extractTrailingIdlePrompt(expectedPrompt || "")) {
@@ -103,6 +111,14 @@ function startPtyJob(ptyStream, command, options) {
   let output = "";
   let foundStart = false;
   let preStartOutput = "";
+  // ANSI/OSC-stripped mirror of preStartOutput. cmd.exe rewrites the window
+  // title with the full current command line on every statement, so the raw
+  // stream is a dense run of OSC sequences that can contain marker text and be
+  // split across chunks. Line-equality against raw text then depends on chunk
+  // boundaries; scanning a stateful-stripped copy keeps the real output line
+  // isolated.
+  let preStartVisible = "";
+  let preStartVisibleCarry = "";
   let visibleOutput = "";
   let visibleOutputOffset = 0;
   // Monotonic high-water mark for the visible byte stream. Increases on every
@@ -124,7 +140,6 @@ function startPtyJob(ptyStream, command, options) {
   let finished = false;
   let unsubscribe = null;
   const cleanupFns = [];
-  let pendingStart = "";
   let pendingEnd = null;
   let resolveResult;
   const outputDecoder = new StringDecoder("utf8");
@@ -477,12 +492,17 @@ function startPtyJob(ptyStream, command, options) {
     let cleaned;
     let outputBaseOffset;
     let totalOutputChars;
+    // ConPTY repaints re-emit the visible screen, so echoed wrapper rows can
+    // land after the start marker with the marker text split across rows.
+    // Every typed row carries the job tag, so strip by tag as well.
+    const markerPrefix = markerTagPrefix(marker);
     if (maxBufferedChars > 0 && foundStart) {
       // Always strip this job's markers from the visible buffer — it accumulates
       // raw PTY data including the end-marker line that must not leak to callers.
       const strippedVisible = normalizePtyOutput(visibleOutput, {
         stripMarkers: true,
         markerToStrip: marker,
+        markerPrefix,
         expectedPrompt,
         trimOutput: normalizeFinalOutput,
         stripPrompt: true,
@@ -494,6 +514,7 @@ function startPtyJob(ptyStream, command, options) {
       const visibleStdout = normalizePtyOutput(stdout, {
         stripMarkers,
         markerToStrip: marker,
+        markerPrefix,
         expectedPrompt,
         trimOutput: false,
         stripPrompt: true,
@@ -502,6 +523,7 @@ function startPtyJob(ptyStream, command, options) {
         ? normalizePtyOutput(stdout, {
           stripMarkers,
           markerToStrip: marker,
+          markerPrefix,
           expectedPrompt,
           trimOutput: true,
           stripPrompt: true,
@@ -564,36 +586,48 @@ function startPtyJob(ptyStream, command, options) {
 
     if (!foundStart) {
       preStartOutput += text;
-      const combined = pendingStart + text;
-      pendingStart = "";
+      const visibleScan = consumeVisibleText(preStartVisibleCarry, text);
+      preStartVisibleCarry = visibleScan.carry;
+      // Scan the complete visible prefix before bounding it: a single 20 MiB
+      // chunk starts with the marker, and truncating first would drop it.
+      const visibleCombined = visibleScan.visibleText
+        ? `${preStartVisible}${visibleScan.visibleText}`
+        : preStartVisible;
+      const boundedVisible = appendBoundedOutput(
+        "",
+        visibleCombined,
+        captureLimitChars,
+      ).text;
       const startMarker = marker + "_S";
-      let matched = false;
-
-      const lines = combined.split(/\r?\n/);
-      const trailingPartial = /[\r\n]$/.test(combined) ? "" : lines.pop() || "";
-      for (const line of lines) {
-        if (stripAnsi(line).trim() === startMarker) {
+      const visibleLines = visibleCombined.split(/[\r\n]/);
+      // ConPTY redraws move the cursor to a new row without emitting a line
+      // break, so the marker can be appended to the previous row's text in the
+      // stream. Match the marker at the end of a row instead of requiring the
+      // whole row to be the marker; PSReadLine always leaves the echoed wrapper
+      // with quotes/continuations after a marker occurrence.
+      for (let index = visibleLines.length - 1; index >= 0; index -= 1) {
+        if (visibleLines[index].trimEnd().endsWith(startMarker)) {
           foundStart = true;
-          matched = true;
           break;
         }
       }
-      pendingStart = trailingPartial;
 
       if (foundStart) {
         clearStartupTimeout();
-        // Use the *last* occurrence of the start marker to skip the echoed
-        // wrapper command and capture only output after the real printf line.
+        // Use the *last* occurrence of the start marker in the stripped stream
+        // to skip the echoed wrapper command and capture only output after the
+        // real printf line. Title OSCs are already gone here, so a marker that
+        // merely appears in cmd.exe's window title cannot move the boundary.
         const markerPattern = new RegExp(`${marker}_S[^\n\r]*(?:\r?\n|$)`, "g");
         let boundary = -1;
         let m;
-        while ((m = markerPattern.exec(preStartOutput)) !== null) {
+        while ((m = markerPattern.exec(visibleCombined)) !== null) {
           boundary = m.index;
         }
         if (boundary !== -1) {
-          const afterBoundary = preStartOutput.slice(boundary);
-          const firstNl = afterBoundary.search(/\r?\n/);
-          const initialOutput = firstNl === -1 ? "" : afterBoundary.slice(firstNl).replace(/^\r?\n/, "");
+          const afterBoundary = visibleCombined.slice(boundary);
+          const firstNl = afterBoundary.search(/[\r\n]/);
+          const initialOutput = firstNl === -1 ? "" : afterBoundary.slice(firstNl).replace(/^[\r\n]+/, "");
           output = "";
           visibleOutput = "";
           visibleOutputOffset = 0;
@@ -601,35 +635,32 @@ function startPtyJob(ptyStream, command, options) {
           appendToOutput(initialOutput);
         }
         preStartOutput = "";
+        preStartVisible = "";
+        preStartVisibleCarry = "";
         schedulePromptFallback();
         checkEnd();
         return;
       }
+      preStartVisible = boundedVisible;
 
-      if (!matched) {
-        const fallbackEnd = findEndMarker(preStartOutput, marker);
-        if (fallbackEnd) {
-          let stdout = preStartOutput.slice(0, fallbackEnd.endIdx);
-          const lastStartIdx = stdout.lastIndexOf(startMarker);
-          if (lastStartIdx !== -1) {
-            const nlAfterStart = stdout.indexOf("\n", lastStartIdx);
-            if (nlAfterStart !== -1) {
-              stdout = stdout.slice(nlAfterStart + 1);
-            }
+      const fallbackEnd = findEndMarker(preStartOutput, marker);
+      if (fallbackEnd) {
+        let stdout = preStartOutput.slice(0, fallbackEnd.endIdx);
+        const lastStartIdx = stdout.lastIndexOf(startMarker);
+        if (lastStartIdx !== -1) {
+          const nlAfterStart = stdout.indexOf("\n", lastStartIdx);
+          if (nlAfterStart !== -1) {
+            stdout = stdout.slice(nlAfterStart + 1);
           }
-          finish(stdout, fallbackEnd.exitCode);
-          return;
         }
+        finish(stdout, fallbackEnd.exitCode);
+        return;
       }
       // A noisy PTY before the start marker must not grow without bound. Keep
       // enough tail for marker/prompt detection; the current chunk was already
       // scanned above so dropping its prefix cannot hide a completed marker.
       if (preStartOutput.length > captureLimitChars) {
         preStartOutput = preStartOutput.slice(-captureLimitChars);
-      }
-      const markerCarryLimit = marker.length + 256;
-      if (pendingStart.length > markerCarryLimit) {
-        pendingStart = pendingStart.slice(-markerCarryLimit);
       }
       // If we're cancelling a still-queued command and the shell has returned
       // to its idle prompt, finish immediately as Cancelled instead of waiting
@@ -749,10 +780,13 @@ function startPtyJob(ptyStream, command, options) {
   let inputWriteTimer = null;
   let inputDrainListener = null;
   let inputWriteGeneration = 0;
+  let clearSettleTimer = null;
   function stopInputWrite() {
     inputWriteGeneration += 1;
     clearTimeout(inputWriteTimer);
     inputWriteTimer = null;
+    clearTimeout(clearSettleTimer);
+    clearSettleTimer = null;
     if (inputDrainListener) ptyStream.removeListener("drain", inputDrainListener);
     inputDrainListener = null;
   }
@@ -822,7 +856,48 @@ function startPtyJob(ptyStream, command, options) {
 
   function writeWrappedCommand() {
     const wrapped = buildWrappedCommand(command, resolvedShellKind, marker, probeLiveShell);
-    writeInput(`${buildPendingInputClearPrefix(resolvedShellKind)}${wrapped}`);
+    writeInputWithClear(wrapped);
+  }
+
+  /**
+   * Deliver the pending-input clear keystroke without arming the input-delivery
+   * deadlines, so the settle window cannot consume the job's startup or
+   * first-output budget.
+   */
+  function writeClearKeystroke(prefix) {
+    stopInputWrite();
+    clearStartupTimeout();
+    clearTimeout(timeoutId);
+    deliveringInput = true;
+    ptyStream.write(prefix);
+  }
+
+  /**
+   * Write the pending-input clear, then the text.
+   *
+   * PowerShell's clear is an edit-mode keystroke rather than text, so writing
+   * it fused with the wrapper makes the line editor swallow the wrapper as part
+   * of the same key sequence: the command never reaches the shell and the job
+   * hangs until its startup timeout. Give the keystroke its own write and let
+   * it settle before typing. Readline-style shells kill text instead, so they
+   * keep the single write.
+   */
+  function writeInputWithClear(text) {
+    const prefix = buildPendingInputClearPrefix(resolvedShellKind);
+    const settleMs = pendingInputClearSettleMs(resolvedShellKind);
+    if (!prefix || !(settleMs > 0)) {
+      writeInput(`${prefix}${text}`);
+      return;
+    }
+
+    writeClearKeystroke(prefix);
+    const generation = inputWriteGeneration;
+    clearTimeout(clearSettleTimer);
+    clearSettleTimer = setTimeout(() => {
+      clearSettleTimer = null;
+      if (finished || cancelRequested || generation !== inputWriteGeneration) return;
+      writeInput(text);
+    }, settleMs);
   }
 
   // Prime the renderer's display suppression before the first byte is typed
@@ -841,7 +916,7 @@ function startPtyJob(ptyStream, command, options) {
     }
   }
   if (probingShell) {
-    writeInput(`${buildPendingInputClearPrefix(resolvedShellKind)}${buildLiveShellProbe(marker)}`);
+    writeInputWithClear(buildLiveShellProbe(marker));
   } else {
     writeWrappedCommand();
   }
