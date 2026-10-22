@@ -15,7 +15,8 @@ const modules = await Promise.all([
 'components/terminal/runtime/terminalSudoAutofill.ts', 'components/terminal/runtime/terminalCommandExecution.ts',
 'components/terminal/runtime/serialLocalEcho.ts', 'components/terminal/autocomplete/terminalStringCellWidth.ts',
 'components/terminal/runtime/shiftEnterText.ts', 'components/terminal/runtime/terminalStartupCommands.ts',
-].map(p=>import(root+'/'+p)));
+'components/terminal/runtime/conptyCursorSync.ts',
+].map(p=>import(new URL('../../../' + p, import.meta.url).href)));
 const source=fs.readFileSync(root+'/components/terminal/runtime/createXTermRuntime.ts','utf8');
 const start=source.indexOf('let lastInputWasPrintable =');
 const end=source.indexOf('  let kittyCompositionPending',start);

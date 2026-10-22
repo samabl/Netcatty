@@ -31,6 +31,7 @@ const helpers = await Promise.all([
   "./terminalSudoAutofill.ts", "./terminalCommandExecution.ts",
   "./terminalPacedBroadcast.ts", "./terminalInterruptInputState.ts", "./serialLocalEcho.ts", "../autocomplete/terminalStringCellWidth.ts",
   "./shiftEnterText.ts", "./serialLineInput.ts", "./telnetLocalEcho.ts",
+  "./conptyCursorSync.ts",
 ].map(path => import(new URL(path, import.meta.url).href)));
 
 for (const [protocol, lineMode, sensitive] of [
