@@ -971,7 +971,9 @@ test("PowerShell wrapper is typed as short statements that cannot wrap", () => {
   // Replay the accumulation the way the shell does: the reconstructed text must
   // contain the original command exactly (including escaped quotes/newlines).
   let accumulated = "";
-  for (const line of lines.slice(0, -1)) {
+  const jobStart = lines.indexOf(`${accumulator}=''`);
+  assert.ok(jobStart > 0, "install the history guard before job statements");
+  for (const line of lines.slice(jobStart, -1)) {
     if (line === `${accumulator}=''`) continue;
     const assignment = new RegExp(`^\\${accumulator}\\+=(.*)$`).exec(line);
     assert.ok(assignment, `unexpected statement: ${line}`);
@@ -1569,6 +1571,118 @@ test("startPtyJob types the wrapper one code point per write for strict bastions
   assert.equal(result.ok, false);
   assert.equal(result.error, "Cancelled");
 });
+
+test("only local ConPTY CMD clearing uses native Escape key events", () => {
+  const options = { windowsConpty: true };
+  assert.equal(buildPendingInputClearPrefix("cmd", options),
+    "\x1b[27;1;27;1;0;1_\x1b[27;1;27;0;0;1_");
+  assert.equal(buildPendingInputClearPrefix("cmd"), "\x1b", "SSH CMD retains legacy input");
+  assert.equal(buildPendingInputClearPrefix("powershell", options), "\x03");
+  assert.equal(buildPendingInputClearPrefix("posix", options), "\x0b\x15");
+  assert.equal(buildPendingInputClearPrefix("raw", options), "");
+});
+
+test("ConPTY CMD discards pending input before the wrapper even when pre-start output is hidden", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const nativeEscape = "\x1b[27;1;27;1;0;1_\x1b[27;1;27;0;0;1_";
+  const pty = new EventEmitter();
+  const writes = [];
+  let pending = "echo STALE_MUST_NOT_EXECUTE & ";
+  let staleExecuted = false;
+  pty.write = (data) => {
+    writes.push(String(data));
+    if (data === nativeEscape) {
+      pending = "";
+      // Actual CMD repaint has only cursor/erase controls, not a CR/LF.
+      pty.emit("data", "\x1b[48;17H\x1b[K\x1b[48;17H");
+      return;
+    }
+    const marker = markerFromWrite(data);
+    if (!marker) return;
+    staleExecuted = pending.includes("STALE_MUST_NOT_EXECUTE");
+    // The MCP result alone looks successful even if the stale command ran
+    // before _S. Assert the native clear and execution state separately.
+    pty.emit("data", `${staleExecuted ? "STALE_MUST_NOT_EXECUTE\r\n" : ""}${marker}_S\r\nafter-clear\r\n${marker}_E:0\r\n`);
+  };
+  const job = startPtyJob(pty, "echo after-clear", {
+    shellKind: "cmd",
+    windowsConpty: true,
+    typedInput: true,
+    timeoutMs: 1000,
+  });
+  assert.deepEqual(writes, [nativeEscape]);
+  assert.equal(pending, "", "the real line editor must abandon pending input");
+  t.mock.timers.tick(120);
+  const result = await job.resultPromise;
+  assert.equal(staleExecuted, false, "do not hide a pre-start execution in successful MCP output");
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(result.stdout, "after-clear");
+});
+
+for (const shellKind of ["cmd", "powershell"]) {
+  test(`${shellKind} clears and repaints pending input before the synthetic echo`, async () => {
+    const pty = new EventEmitter();
+    const events = [];
+    const writes = [];
+    const clear = buildPendingInputClearPrefix(shellKind, { windowsConpty: true });
+    pty.write = (data) => {
+      writes.push(String(data));
+      events.push(["write", String(data)]);
+      if (data === clear) {
+        setTimeout(() => {
+          events.push(["redraw"]);
+          pty.emit("data", "\r\x1b[2Kprompt> ");
+        }, 20);
+      } else {
+        assert.ok(events.some(([kind]) => kind === "echo"), "echo precedes wrapper input");
+        assert.ok(events.some(([kind]) => kind === "prime"), "prime precedes wrapper input");
+      }
+    };
+    const job = startPtyJob(pty, "echo after-clear", {
+      shellKind,
+      windowsConpty: true,
+      typedInput: true,
+      timeoutMs: 1000,
+      echoCommand: (command) => events.push(["echo", command]),
+      onEchoSuppressionPrime: (marker) => events.push(["prime", marker]),
+    });
+    assert.deepEqual(events, [["write", clear]], "clear is a separate visible keystroke");
+    await waitForMarkerWrite(writes, job.marker);
+    const order = events.map(([kind]) => kind);
+    assert.ok(order.indexOf("redraw") < order.indexOf("echo"), "shell repaint is not hidden");
+    assert.ok(order.indexOf("echo") < order.indexOf("prime"), "synthetic echo is not suppressed");
+    assert.equal(order.filter((kind) => kind === "echo").length, 1);
+    assert.equal(order.filter((kind) => kind === "prime").length, 1);
+    pty.emit("data", `${job.marker}_S\r\nafter-clear\r\n${job.marker}_E:0\r\n`);
+    const result = await job.resultPromise;
+    assert.equal(result.ok, true, JSON.stringify(result));
+    assert.equal(result.stdout, "after-clear");
+  });
+
+  test(`${shellKind} cancellation during the visible clear never echoes or types the command`, async () => {
+    const pty = new EventEmitter();
+    const writes = [];
+    const display = [];
+    pty.write = (data) => writes.push(String(data));
+    const job = startPtyJob(pty, "echo must-not-run", {
+      shellKind,
+      windowsConpty: true,
+      typedInput: true,
+      timeoutMs: 1000,
+      echoCommand: (command) => display.push(command),
+      onEchoSuppressionPrime: (marker) => display.push(marker),
+    });
+    assert.deepEqual(display, []);
+    assert.deepEqual(writes, [buildPendingInputClearPrefix(shellKind, { windowsConpty: true })]);
+    job.cancel();
+    pty.emit("close");
+    const result = await job.resultPromise;
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    assert.equal(result.error, "Cancelled");
+    assert.deepEqual(display, []);
+    assert.ok(!writes.some((data) => data.includes("must-not-run") || data.includes("__NCMCP_")));
+  });
+}
 
 test("echo suppression prime is delivered before the first typed input (#3384)", async () => {
   for (const probeLiveShell of [false, true]) {

@@ -485,11 +485,11 @@ function shutdownHost({ preserveScopedMetadata = false } = {}) {
   sessionIdleManager.clearAll();
 }
 
-function echoCommandToSession(session, sessionId, command, { syntheticEcho = true } = {}) {
+function echoCommandToSession(session, sessionId, command, { syntheticEcho = true, meta } = {}) {
   if (!electronModule || !session?.webContentsId || !command) return;
   const contents = electronModule.webContents?.fromId?.(session.webContentsId);
   if (!syntheticEcho) {
-    emitTerminalSessionData(contents, sessionId, formatSyntheticEcho(command), { session });
+    emitTerminalSessionData(contents, sessionId, formatSyntheticEcho(command), { session, meta });
     return;
   }
   safeSend(contents, "netcatty:data", {

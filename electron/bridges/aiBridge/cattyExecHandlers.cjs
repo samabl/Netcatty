@@ -215,15 +215,16 @@ function registerCattyExecHandlers(ctx) {
             bastionKeystrokes: remoteDisallowsExecChannelProbe(session.remoteSshVersion),
             onProbeAborted: (marker) => {
               const contents = electronModule?.webContents?.fromId?.(session.webContentsId);
-              emitTerminalSessionData(contents, sessionId, `${marker}_R\n`, { session });
+              emitTerminalSessionData(contents, sessionId, `${marker}_R\n`, { session, meta: session.type === "local" && process.platform === "win32" ? { mcpConptyCursorSync: true } : undefined });
             },
             onEchoSuppressionPrime: (marker) => {
               const contents = electronModule?.webContents?.fromId?.(session.webContentsId);
-              emitTerminalSessionData(contents, sessionId, `${marker}_I\n`, { session });
+              emitTerminalSessionData(contents, sessionId, `${marker}_I\n`, { session, meta: session.type === "local" && process.platform === "win32" ? { mcpConptyCursorSync: true } : undefined });
             },
             chatSessionId,
             expectedPrompt: getFreshIdlePrompt(session),
             typedInput: true,
+            windowsConpty: session.type === "local" && process.platform === "win32",
             echoCommand: (rawCommand) => {
               const contents = electronModule?.webContents?.fromId?.(session.webContentsId);
               safeSend(contents, "netcatty:data", {

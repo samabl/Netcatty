@@ -29,78 +29,7 @@ function createFakePort() {
   };
 }
 
-function loadPreloadWithFakeElectron() {
-  const handlers = new Map();
-  const listenerCounts = new Map();
-  const sent = [];
-  let exposedApi = null;
-  const fakeElectron = {
-    ipcRenderer: {
-      on(channel, handler) {
-        handlers.set(channel, handler);
-        listenerCounts.set(channel, (listenerCounts.get(channel) || 0) + 1);
-      },
-      send(channel, payload) {
-        sent.push({ channel, payload });
-      },
-      async invoke(channel, payload) {
-        if (channel === "netcatty:local:start") {
-          return { sessionId: payload?.sessionId };
-        }
-        return null;
-      },
-    },
-    contextBridge: {
-      exposeInMainWorld(_name, value) {
-        exposedApi = value;
-      },
-    },
-    webUtils: {
-      getPathForFile(file) {
-        return file?.path ?? "";
-      },
-    },
-  };
-
-  const electronPath = require.resolve("electron");
-  const preloadPath = require.resolve("./preload.cjs");
-  const previousElectron = require.cache[electronPath];
-  const previousWindow = global.window;
-
-  require.cache[electronPath] = {
-    id: electronPath,
-    filename: electronPath,
-    loaded: true,
-    exports: fakeElectron,
-  };
-  delete require.cache[preloadPath];
-  global.window = {
-    location: { origin: "app://netcatty" },
-    netcatty: undefined,
-  };
-
-  require(preloadPath);
-
-  return {
-    api: exposedApi,
-    handlers,
-    listenerCounts,
-    sent,
-    cleanup() {
-      delete require.cache[preloadPath];
-      if (previousElectron) {
-        require.cache[electronPath] = previousElectron;
-      } else {
-        delete require.cache[electronPath];
-      }
-      if (previousWindow === undefined) {
-        delete global.window;
-      } else {
-        global.window = previousWindow;
-      }
-    },
-  };
-}
+const { loadPreloadWithFakeElectron } = require("./preload/fixtures/loadPreloadWithFakeElectron.cjs");
 
 test("setTerminalKeyboardFocus sends renderer focus state to the window manager", () => {
   const preload = loadPreloadWithFakeElectron();
@@ -1987,3 +1916,229 @@ test('real OpenWrt ash hides wrapped input and preserves output with priming (#3
     client.end();
   }
 });
+
+test("MCP suppression does not release on an echoed start marker at a chunk boundary", (t) => {
+  const preload = loadPreloadWithFakeElectron();
+  t.after(preload.cleanup);
+  const received = [];
+  preload.api.onSessionData("split-start", (data) => received.push(data));
+  const send = (data) => preload.handlers.get("netcatty:data")({}, { sessionId: "split-start", data });
+  const marker = "__NCMCP_split_start__";
+  send(`${marker}_I\r\n`);
+  send(`C:\\>set x=0 & echo ${marker}_S`);
+  send(" & wrapper-must-stay-hidden\r\n");
+  send(`${marker}_S\r\nvisible\r\n${marker}_E:0\r\nC:\\>`);
+  assert.equal(received.join(""), "visible\r\nC:\\>");
+});
+
+function createMcpReplayHarness(preload, transport, sessionId, received) {
+  preload.api.onSessionData(sessionId, (data, meta) => received.push({ data, meta }));
+  if (transport === "port") {
+    const port = createFakePort();
+    preload.handlers.get("netcatty:terminal-output-port")({ ports: [port] }, { sessionId });
+    return (data, meta) => port.emit({ sessionId, data, meta });
+  }
+  return (data, meta) => preload.handlers.get("netcatty:data")({}, { sessionId, data, meta });
+}
+
+for (const transport of ["legacy", "port"]) {
+  for (const oneCharacterChunks of [false, true]) {
+    test(`CMD ConPTY replay keeps all output and prompts via ${transport}, split=${oneCharacterChunks}`, async (t) => {
+      const preload = loadPreloadWithFakeElectron();
+      t.after(preload.cleanup);
+      const fixture = require("./preload/fixtures/cmd-agent-conpty.json");
+      const received = [];
+      const send = createMcpReplayHarness(preload, transport, "cmd-replay", received);
+      let ingressBytes = 0;
+      for (const event of fixture.events) {
+        if (event.type === "prime") { send(event.data); continue; }
+        const chunks = oneCharacterChunks ? [...event.data] : [event.data];
+        for (const data of chunks) {
+          ingressBytes += data.length;
+          send(data, { pluginPipelineIngressBytes: data.length });
+        }
+      }
+      await sleep(100);
+      const { createMcpOscFilter } = require("./preload/mcpOscFilter.cjs");
+      const output = createMcpOscFilter().split("display", received.map((item) => item.data).join(""))
+        .filter((part) => part.kind === "text").map((part) => part.data).join("");
+      for (const text of ["one-ok", "two-ok", "three-ok"]) {
+        assert.equal(output.split(text).length - 1, 1, `${text} must be shown once`);
+      }
+      assert.equal(output.split("C:\\Users\\agent>").length - 1, 3, "every command must restore its prompt");
+      assert.doesNotMatch(output, /__NCMCP_|call cmd|errorlevel/i);
+      assert.equal(received.reduce((total, item) => total + (item.meta?.pluginPipelineIngressBytes || 0), 0), ingressBytes);
+    });
+  }
+}
+
+for (const transport of ["legacy", "port"]) {
+  test(`OSC titles never release MCP suppression via ${transport}`, (t) => {
+    const preload = loadPreloadWithFakeElectron();
+    t.after(preload.cleanup);
+    const received = [];
+    const send = createMcpReplayHarness(preload, transport, "osc-probe", received);
+    const marker = "__NCMCP_osc_probe__";
+    send("\u001b]0;old title ");
+    send(`${marker}_I\r\n`);
+    send(`echo ${marker}_S\u001b\\`);
+    send("wrapper-must-stay-hidden\r\n");
+    send(`${marker}_S \r\nvisible\r\n${marker}_E:0\r\nC:\\>`);
+    assert.equal(received.map((item) => item.data).join(""), "visible\r\nC:\\>");
+  });
+}
+
+for (const transport of ["legacy", "port"]) {
+  test(`partial OSC preserves bytes and ingress without stale perf via ${transport}`, (t) => {
+    const preload = loadPreloadWithFakeElectron();
+    t.after(preload.cleanup);
+    const received = [];
+    const send = createMcpReplayHarness(preload, transport, "osc-meta", received);
+    const first = "prefix\u001b]0;CMD";
+    const second = " title\u0007\u001b]8;;https://example.test/__NCMCP_link___S\u001b\\"
+      + "shown\u001b]8;;\u001b\\";
+    send(first, { terminalPerf: createTerminalPerfMeta("old"), pluginPipelineIngressBytes: first.length });
+    send(second, { terminalPerf: createTerminalPerfMeta("new"), pluginPipelineIngressBytes: second.length });
+    assert.equal(received.map((item) => item.data).join(""), first + second);
+    assert.ok(received.every((item) => !item.meta?.terminalPerf));
+    const terminalPerf = createTerminalPerfMeta("fresh");
+    send("fresh", { terminalPerf, pluginPipelineIngressBytes: 5 });
+    assert.deepEqual(received.at(-1), { data: "fresh", meta: { terminalPerf, pluginPipelineIngressBytes: 5 } });
+    assert.equal(received.reduce((total, item) => total + (item.meta?.pluginPipelineIngressBytes || 0), 0), first.length + second.length + 5);
+  });
+}
+
+
+for (const transport of ["legacy", "port"]) {
+  for (const chunks of ["whole", "characters"]) {
+    test(`opaque OSC stays ordered after a visible marker-prefix suffix via ${transport} (${chunks})`, (t) => {
+      const preload = loadPreloadWithFakeElectron();
+      t.after(preload.cleanup);
+      const received = [];
+      const send = createMcpReplayHarness(preload, transport, "osc-order", received);
+      const input = "prefix_\u001b]0;ordinary title\u0007suffix\r\n"
+        + "\u001b]8;;https://example.test/__NCMCP_link___S\u001b\\"
+        + "link_\u001b]8;;\u001b\\after\r\n";
+      for (const chunk of chunks === "whole" ? [input] : [...input]) {
+        send(chunk, { pluginPipelineIngressBytes: chunk.length });
+      }
+      assert.equal(received.map((item) => item.data).join(""), input);
+      assert.equal(received.reduce((total, item) => total + (item.meta?.pluginPipelineIngressBytes || 0), 0), input.length);
+    });
+  }
+}
+
+for (const transport of ["legacy", "port"]) {
+  test(`ConPTY cursor boundaries stay ordered through ${transport}, including split CRLF`, () => {
+    const preload = loadPreloadWithFakeElectron();
+    try {
+      const sessionId = "conpty-cursor-test";
+      const marker = "__NCMCP_cursor___";
+      const sync = "\u001b]633;NetcattyMcpCursorSync\u0007";
+      const start = "\u001b]633;NetcattyMcpCommandStart\u0007";
+      const received = [];
+      preload.api.onSessionData(sessionId, (data) => received.push(data));
+      let send;
+      if (transport === "port") {
+        const port = createFakePort();
+        preload.handlers.get("netcatty:terminal-output-port")?.({ ports: [port] }, { sessionId });
+        send = (data, meta) => port.emit({ kind: "data", sessionId, data, meta });
+      } else {
+        send = (data, meta) => preload.handlers.get("netcatty:data")({}, { sessionId, data, meta });
+      }
+      send(`${marker}_I\n`, { mcpConptyCursorSync: true });
+      assert.equal(received.join(""), sync);
+      send(`hidden '${marker}_S'; accumulator\r\n`);
+      assert.equal(received.join(""), sync, "quoted wrapper literals must not reanchor");
+      send(`${marker}_S\r`);
+      send(`\nOUTPUT\r\n${marker}_E:0\r\nPS C:\\test> `);
+      assert.equal(received.join(""), sync + start + "OUTPUT\r\n" + sync + "PS C:\\test> ");
+      send(`${marker}_R\n`);
+      assert.equal(received.join("").endsWith(sync), true);
+    } finally { preload.cleanup(); }
+  });
+}
+
+test("cursor boundary opt-in is per session and absent from ordinary/remote output", () => {
+  const preload = loadPreloadWithFakeElectron();
+  try {
+    const local = [], remote = [];
+    preload.api.onSessionData("local", (data) => local.push(data));
+    preload.api.onSessionData("remote", (data) => remote.push(data));
+    const send = (sessionId, data, meta) => preload.handlers.get("netcatty:data")({}, { sessionId, data, meta });
+    send("local", "__NCMCP_local___I\n", { mcpConptyCursorSync: true });
+    send("remote", "__NCMCP_remote___I\n");
+    send("remote", "__NCMCP_remote___S\r\nREMOTE\r\n");
+    send("local", "__NCMCP_local___S\r\nLOCAL\r\n");
+    assert.equal(remote.join(""), "REMOTE\r\n");
+    assert.equal(local.join("").includes("NetcattyMcpCursorSync"), true);
+  } finally { preload.cleanup(); }
+});
+
+for (const transport of ["legacy", "port"]) {
+  test(`idle input releases an unterminated hidden history repaint via ${transport}`, async (t) => {
+    const preload = loadPreloadWithFakeElectron();
+    t.after(preload.cleanup);
+    const sessionId = `history-reset-${transport}`;
+    const received = [];
+    const send = createMcpReplayHarness(preload, transport, sessionId, received);
+    const meta = { mcpConptyCursorSync: true };
+    send("__NCMCP_ready___I\n", meta);
+    send("__NCMCP_ready___R\n", meta);
+    send("\rPS C:\\> $__NCMCP_old='hidden'");
+    await sleep(100); // The old flush deliberately retains drop-until-newline.
+    const before = received.map((item) => item.data).join("");
+    preload.api.writeToSession(sessionId, "\x1b[A");
+    send("\rPS C:\\> Write-Output 'manual'");
+    await sleep(50);
+    const after = received.map((item) => item.data).join("").slice(before.length);
+    assert.match(after, /Write-Output 'manual'/);
+    assert.doesNotMatch(after, /__NCMCP_/);
+    assert.equal(preload.sent.filter((item) => item.channel === "netcatty:write").length, 1);
+  });
+
+  test(`history skip retains direction and exact flow credit via ${transport}`, async (t) => {
+    const preload = loadPreloadWithFakeElectron();
+    t.after(preload.cleanup);
+    const sessionId = `history-skip-${transport}`;
+    const received = [];
+    const send = createMcpReplayHarness(preload, transport, sessionId, received);
+    const meta = { mcpConptyCursorSync: true };
+    send("__NCMCP_ready___I\n", meta);
+    send("__NCMCP_ready___R\n", meta);
+    preload.api.writeToSession(sessionId, "\x1b[B");
+    const first = "\rPS C:\\> $__NC";
+    const second = "MCP_old='hidden'";
+    send(first, { pluginPipelineIngressBytes: first.length });
+    await sleep(45);
+    send(second, { pluginPipelineIngressBytes: second.length });
+    assert.equal(received.reduce((n, item) => n + (item.meta?.pluginPipelineIngressBytes || 0), 0), first.length + second.length);
+    await sleep(45);
+    assert.deepEqual(preload.sent.filter((item) => item.channel === "netcatty:write").map((item) => item.payload.data), ["\x1b[B", "\x1b[B"]);
+    const manual = "\rPS C:\\> Write-Output 'manual'";
+    send(manual, { pluginPipelineIngressBytes: manual.length });
+    await sleep(50);
+    assert.match(received.map((item) => item.data).join(""), /Write-Output 'manual'/);
+    assert.doesNotMatch(received.map((item) => item.data).join(""), /__NCMCP_/);
+    assert.equal(received.reduce((n, item) => n + (item.meta?.pluginPipelineIngressBytes || 0), 0), first.length + second.length + manual.length);
+    assert.equal(received.filter((item) => item.data.includes("manual")).at(-1).meta.pluginPipelineIngressBytes, 0);
+  });
+
+  test(`interrupt and close cancel hidden-history retries via ${transport}`, async (t) => {
+    const preload = loadPreloadWithFakeElectron();
+    t.after(preload.cleanup);
+    for (const action of ["interrupt", "close"]) {
+      const sessionId = `history-cancel-${transport}-${action}`;
+      const send = createMcpReplayHarness(preload, transport, sessionId, []);
+      const meta = { mcpConptyCursorSync: true };
+      send("__NCMCP_ready___I\n", meta);
+      send("__NCMCP_ready___R\n", meta);
+      preload.api.writeToSession(sessionId, "\x1b[A");
+      send("__NCMCP_old");
+      if (action === "interrupt") preload.api.interruptSession(sessionId);
+      else await preload.api.closeSession(sessionId);
+    }
+    await sleep(70);
+    assert.equal(preload.sent.filter((item) => item.channel === "netcatty:write").length, 2);
+  });
+}

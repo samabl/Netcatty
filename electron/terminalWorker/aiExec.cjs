@@ -320,17 +320,22 @@ function createWorkerAiExecHandler({
           event?.sender?.send?.("netcatty:data", {
             sessionId,
             data: `${marker}_R\n`,
+            ...(session.type === "local" && process.platform === "win32"
+              ? { meta: { mcpConptyCursorSync: true } } : {}),
           });
         },
         onEchoSuppressionPrime: (marker) => {
           event?.sender?.send?.("netcatty:data", {
             sessionId,
             data: `${marker}_I\n`,
+            ...(session.type === "local" && process.platform === "win32"
+              ? { meta: { mcpConptyCursorSync: true } } : {}),
           });
         },
         chatSessionId,
         expectedPrompt: getFreshIdlePrompt(session),
         typedInput: true,
+        windowsConpty: session.type === "local" && process.platform === "win32",
         echoCommand: (rawCommand) => {
           event?.sender?.send?.("netcatty:data", {
             sessionId,
@@ -521,17 +526,22 @@ function createWorkerAiJobStartHandler({
           event?.sender?.send?.("netcatty:data", {
             sessionId,
             data: `${marker}_R\n`,
+            ...(session.type === "local" && process.platform === "win32"
+              ? { meta: { mcpConptyCursorSync: true } } : {}),
           });
         },
         onEchoSuppressionPrime: (marker) => {
           event?.sender?.send?.("netcatty:data", {
             sessionId,
             data: `${marker}_I\n`,
+            ...(session.type === "local" && process.platform === "win32"
+              ? { meta: { mcpConptyCursorSync: true } } : {}),
           });
         },
         chatSessionId,
         expectedPrompt: getFreshIdlePrompt(session),
         typedInput: true,
+        windowsConpty: session.type === "local" && process.platform === "win32",
         echoCommand: (rawCommand) => {
           event?.sender?.send?.("netcatty:data", {
             sessionId,

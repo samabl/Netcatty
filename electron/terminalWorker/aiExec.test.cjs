@@ -170,6 +170,50 @@ function createDeferredShellProbeConn(stdout = `${PROBE_OUTPUT_MARKER}/usr/bin/f
   };
 }
 
+for (const shellKind of ["cmd", "powershell"]) {
+  test(`worker local ${shellKind} boundaries opt into cursor sync only on Windows`, async (t) => {
+    const pty = new FakePty();
+    const sessionId = `local-${shellKind}`;
+    const session = { type: "local", protocol: "local", pty, shellKind };
+    const ipcMain = createFakeIpcMain();
+    registerWorkerAiExecHandlers(ipcMain, { sessions: new Map([[sessionId, session]]) });
+    const event = createFakeEvent();
+    const started = await ipcMain.handlers.get("netcatty:ai:jobStart")(event, {
+      sessionId, command: "echo LOCAL_WORKER_OK", commandTimeoutMs: 5000,
+    });
+    assert.equal(started.ok, true);
+    t.after(() => ipcMain.handlers.get("netcatty:ai:jobStop")(event, { jobId: started.jobId }));
+    const deadline = Date.now() + 3000;
+    let marker;
+    while (Date.now() < deadline) {
+      const input = pty.writes.join("");
+      const prime = event.rendererMessages.find(({ payload }) => /^__NCMCP_[A-Za-z0-9_]+___I\n$/.test(payload.data));
+      const complete = shellKind === "powershell"
+        ? input.includes("\rInvoke-Expression ") && input.endsWith("\r")
+        : input.includes("_E:") && input.endsWith("\n");
+      if (prime && complete) {
+        marker = prime.payload.data.slice(0, -3);
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.ok(marker, "the local wrapper was written");
+    const prime = event.rendererMessages.find(({ payload }) => payload.data === `${marker}_I\n`);
+    assert.ok(prime, "the renderer receives the ordered prime boundary");
+    if (process.platform === "win32") {
+      assert.deepEqual(prime.payload.meta, { mcpConptyCursorSync: true });
+    } else {
+      assert.equal(Object.hasOwn(prime.payload, "meta"), false);
+    }
+    pty.emit("data", `${marker}_S\r\nLOCAL_WORKER_OK\r\n${marker}_E:0\r\n`);
+    await nextTick();
+    const polled = await ipcMain.handlers.get("netcatty:ai:jobPoll")(event, { jobId: started.jobId });
+    assert.equal(polled.status, "completed");
+    assert.equal(polled.exitCode, 0);
+    assert.match(polled.output, /LOCAL_WORKER_OK/);
+  });
+}
+
 test("worker AI background jobs start, poll, stop, and block overlapping exec", async () => {
   const pty = new FakePty();
   const sessions = new Map([

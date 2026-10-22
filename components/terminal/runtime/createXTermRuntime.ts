@@ -1,3 +1,4 @@
+import { installConptyCursorSync, notifyConptyCursorSyncInput } from "./conptyCursorSync";
 import { clearTerminalBroadcastUserInput, captureTerminalBroadcastInput, isTerminalBroadcastInputCurrent, markTerminalBroadcastUserInput, type TerminalPacedBroadcast } from "./terminalPacedBroadcast";
 import { stringCellWidth } from "../autocomplete/terminalStringCellWidth";
 import type { TerminalBroadcastInputOptions } from "../terminalHelpers";
@@ -1247,6 +1248,10 @@ export const createXTermRuntime = (ctx: CreateXTermRuntimeContext): XTermRuntime
     const logicalData = options?.logicalData === null
       ? null
       : sanitizeTerminalInput(options?.logicalData ?? data);
+
+    // Suspend shell-input cursor rebasing before a submitted command can emit
+    // screen-addressed output. Win32 key-up records have no logical input.
+    if (logicalData !== null) notifyConptyCursorSyncInput(term, logicalData);
 
     // Clipboard paste / typed password while assist is open must dismiss the
     // hint first. Otherwise Enter is still hijacked for confirmFill and can
@@ -3113,6 +3118,10 @@ export const createXTermRuntime = (ctx: CreateXTermRuntimeContext): XTermRuntime
     return true; // Indicate we handled the sequence
   });
 
+  const conptyCursorSyncDisposable = installConptyCursorSync(
+    term, windowsPty?.backend === "conpty",
+  );
+
   const osc133Disposable = term.parser.registerOscHandler(133, (data) => {
     if (consumeOsc133CommandCompletion(data, ctx.promptLineBreakStateRef?.current)) {
       ctx.onCommandCompleted?.();
@@ -3364,6 +3373,7 @@ export const createXTermRuntime = (ctx: CreateXTermRuntimeContext): XTermRuntime
       textarea?.removeEventListener("blur", clearKittyTransientInputState);
       clearKittyTransientInputState();
       osc7Disposable.dispose();
+      conptyCursorSyncDisposable?.dispose();
       osc133Disposable.dispose();
       osc9Disposable.dispose();
       osc777Disposable.dispose();

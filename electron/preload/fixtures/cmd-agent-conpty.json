@@ -1,0 +1,318 @@
+{
+  "description": "Sanitized real Windows CMD ConPTY output for three sequential agent commands. Includes OSC 0 titles with stale wrapper markers, cursor redraws, bare CRs and split CRLFs.",
+  "commands": [
+    "echo one-ok",
+    "echo two-ok",
+    "echo three-ok"
+  ],
+  "events": [
+    {
+      "type": "prime",
+      "data": "__NCMCP_cap0_abababababababababababababababab___I\r\n"
+    },
+    {
+      "type": "pty",
+      "data": "\u001b[?7l\u001b[?7h"
+    },
+    {
+      "type": "pty",
+      "data": "\u001b]0;Administrator: C:\\Windows\\System32\\cmd.exe\u001b\\"
+    },
+    {
+      "type": "pty",
+      "data": "C:\\Users\\agent>"
+    },
+    {
+      "type": "pty",
+      "data": "\u001b[1;17Hset \"__NCMCP_cap0_abababababababababababababababab__=0\" & (echo __NCMCP_cap0_abababababababababababababababab___S & set \"PAGER=cat\" & set \"SYSTEMD_PAGER=\" & set \"GIT_PAGER=cat\" & set \"LESS=\" & cmd /d /s /c echo one-ok & call echo __NCMCP_cap0_abababababababababababababababab___E:^%errorlevel^%)\u001b[4;12H\r\n"
+    },
+    {
+      "type": "pty",
+      "data": "\u001b]0;Administrator: C:\\Windows\\System32\\cmd.exe - set  \"__NCMCP_cap0_abababababababababababababababab__=0\" \u001b\\"
+    },
+    {
+      "type": "pty",
+      "data": "\u001b]0;Administrator: C:\\Windows\\System32\\cmd.exe\u001b\\\u001b]0;Administrator: C:\\Windows\\System32\\cmd.exe - echo  __NCMCP_cap0_abababababababababababababababab___S \u001b\\"
+    },
+    {
+      "type": "pty",
+      "data": "__NCMCP_cap0_abababababababababababababababab___S \r\n\u001b]0;Administrator: C:\\Windows\\System32\\cmd.exe\u001b\\"
+    },
+    {
+      "type": "pty",
+      "data": "\u001b]0;Administrator: C:\\Windows\\System32\\cmd.exe - set  \"PAGER=cat\" \u001b\\"
+    },
+    {
+      "type": "pty",
+      "data": "\u001b]0;Administrator: C:\\Windows\\System32\\cmd.exe\u001b\\\u001b]0;Administrator: C:\\Windows\\System32\\cmd.exe - set  \"SYSTEMD_PAGER=\" \u001b\\"
+    },
+    {
+      "type": "pty",
+      "data": "\u001b]0;Administrator: C:\\Windows\\System32\\cmd.exe\u001b\\"
+    },
+    {
+      "type": "pty",
+      "data": "\u001b]0;Administrator: C:\\Windows\\System32\\cmd.exe - set  \"GIT_PAGER=cat\" \u001b\\"
+    },
+    {
+      "type": "pty",
+      "data": "\u001b]0;Administrator: C:\\Windows\\System32\\cmd.exe\u001b\\"
+    },
+    {
+      "type": "pty",
+      "data": "\u001b]0;Administrator: C:\\Windows\\System32\\cmd.exe - set  \"LESS=\" \u001b\\"
+    },
+    {
+      "type": "pty",
+      "data": "\u001b]0;Administrator: C:\\Windows\\System32\\cmd.exe\u001b\\"
+    },
+    {
+      "type": "pty",
+      "data": "\u001b]0;Administrator: C:\\Windows\\System32\\cmd.exe - cmd  /d /s /c echo one-ok \u001b\\"
+    },
+    {
+      "type": "pty",
+      "data": "\u001b[?7l"
+    },
+    {
+      "type": "pty",
+      "data": "\u001b[?7h"
+    },
+    {
+      "type": "pty",
+      "data": "one-ok \r\n"
+    },
+    {
+      "type": "pty",
+      "data": "\u001b]0;Administrator: C:\\Windows\\System32\\cmd.exe\u001b\\"
+    },
+    {
+      "type": "pty",
+      "data": "\u001b]0;Administrator: C:\\Windows\\System32\\cmd.exe - call  echo __NCMCP_cap0_abababababababababababababababab___E:%errorlevel%\u001b\\"
+    },
+    {
+      "type": "pty",
+      "data": "\u001b]0;Administrator: C:\\Windows\\System32\\cmd.exe - echo  __NCMCP_cap0_abababababababababababababababab___E:0\u001b\\"
+    },
+    {
+      "type": "pty",
+      "data": "__NCMCP_cap0_abababababababababababababababab___E:0\r\n"
+    },
+    {
+      "type": "pty",
+      "data": "\u001b]0;Administrator: C:\\Windows\\System32\\cmd.exe - call  echo __NCMCP_cap0_abababababababababababababababab___E:%errorlevel%\u001b\\"
+    },
+    {
+      "type": "pty",
+      "data": "\r\n"
+    },
+    {
+      "type": "pty",
+      "data": "C:\\Users\\agent>"
+    },
+    {
+      "type": "prime",
+      "data": "__NCMCP_cap1_abababababababababababababababab___I\r\n"
+    },
+    {
+      "type": "pty",
+      "data": "\u001b[9;17Hs\u001b[9;18H"
+    },
+    {
+      "type": "pty",
+      "data": "\u001b[9;18Het \"__NCMCP_cap1_abababababababababababababababab__=0\" & (echo __NCMCP_cap1_abababababababababababababababab___S & set \"PAGER=cat\" & set \"SYSTEMD_PAGER=\" & set \"GIT_PAGER=cat\" & set \"LESS=\" & cmd /d /s /c echo two-ok & call echo __NCMCP_cap1_abababababababababababababababab___E:^%errorlevel^%)\u001b[12;12H\u001b[12;12H\r\n"
+    },
+    {
+      "type": "pty",
+      "data": "\u001b]0;Administrator: C:\\Windows\\System32\\cmd.exe - call  echo __NCMCP_cap0_abababababababababababababababab___E:%errorlevel% - set  \"__NCMCP_cap1_abababababababababababababababab__=0\" \u001b\\"
+    },
+    {
+      "type": "pty",
+      "data": "\u001b]0;Administrator: C:\\Windows\\System32\\cmd.exe - call  echo __NCMCP_cap0_abababababababababababababababab___E:%errorlevel%\u001b\\"
+    },
+    {
+      "type": "pty",
+      "data": "\u001b]0;Administrator: C:\\Windows\\System32\\cmd.exe - call  echo __NCMCP_cap0_abababababababababababababababab___E:%errorlevel% - echo  __NCMCP_cap1_abababababababababababababababab___S \u001b\\"
+    },
+    {
+      "type": "pty",
+      "data": "__NCMCP_cap1_abababababababababababababababab___S \r\n"
+    },
+    {
+      "type": "pty",
+      "data": "\u001b]0;Administrator: C:\\Windows\\System32\\cmd.exe - call  echo __NCMCP_cap0_abababababababababababababababab___E:%errorlevel%\u001b\\\u001b]0;Administrator: C:\\Windows\\System32\\cmd.exe - call  echo __NCMCP_cap0_abababababababababababababababab___E:%errorlevel% - set  \"PAGER=cat\" \u001b\\"
+    },
+    {
+      "type": "pty",
+      "data": "\u001b]0;Administrator: C:\\Windows\\System32\\cmd.exe - call  echo __NCMCP_cap0_abababababababababababababababab___E:%errorlevel%\u001b\\"
+    },
+    {
+      "type": "pty",
+      "data": "\u001b]0;Administrator: C:\\Windows\\System32\\cmd.exe - call  echo __NCMCP_cap0_abababababababababababababababab___E:%errorlevel% - set  \"SYSTEMD_PAGER=\" \u001b\\"
+    },
+    {
+      "type": "pty",
+      "data": "\u001b]0;Administrator: C:\\Windows\\System32\\cmd.exe - call  echo __NCMCP_cap0_abababababababababababababababab___E:%errorlevel%\u001b\\"
+    },
+    {
+      "type": "pty",
+      "data": "\u001b]0;Administrator: C:\\Windows\\System32\\cmd.exe - call  echo __NCMCP_cap0_abababababababababababababababab___E:%errorlevel% - set  \"GIT_PAGER=cat\" \u001b\\"
+    },
+    {
+      "type": "pty",
+      "data": "\u001b]0;Administrator: C:\\Windows\\System32\\cmd.exe - call  echo __NCMCP_cap0_abababababababababababababababab___E:%errorlevel%\u001b\\"
+    },
+    {
+      "type": "pty",
+      "data": "\u001b]0;Administrator: C:\\Windows\\System32\\cmd.exe - call  echo __NCMCP_cap0_abababababababababababababababab___E:%errorlevel% - set  \"LESS=\" \u001b\\"
+    },
+    {
+      "type": "pty",
+      "data": "\u001b]0;Administrator: C:\\Windows\\System32\\cmd.exe - call  echo __NCMCP_cap0_abababababababababababababababab___E:%errorlevel%\u001b\\"
+    },
+    {
+      "type": "pty",
+      "data": "\u001b]0;Administrator: C:\\Windows\\System32\\cmd.exe - call  echo __NCMCP_cap0_abababababababababababababababab___E:%errorlevel% - cmd  /d /s /c echo two-ok \u001b\\"
+    },
+    {
+      "type": "pty",
+      "data": "\u001b[?7l"
+    },
+    {
+      "type": "pty",
+      "data": "\u001b[?7h"
+    },
+    {
+      "type": "pty",
+      "data": "two-ok \r\n"
+    },
+    {
+      "type": "pty",
+      "data": "\u001b]0;Administrator: C:\\Windows\\System32\\cmd.exe - call  echo __NCMCP_cap0_abababababababababababababababab___E:%errorlevel%\u001b\\"
+    },
+    {
+      "type": "pty",
+      "data": "\u001b]0;Administrator: C:\\Windows\\System32\\cmd.exe - call  echo __NCMCP_cap0_abababababababababababababababab___E:%errorlevel% - call  echo __NCMCP_cap1_abababababababababababababababab___E:%errorlevel%\u001b\\"
+    },
+    {
+      "type": "pty",
+      "data": "\u001b]0;Administrator: C:\\Windows\\System32\\cmd.exe - call  echo __NCMCP_cap0_abababababababababababababababab___E:%errorlevel% - echo  __NCMCP_cap1_abababababababababababababababab___E:0\u001b\\"
+    },
+    {
+      "type": "pty",
+      "data": "__NCMCP_cap1_abababababababababababababababab___E:0\r\n\u001b]0;Administrator: C:\\Windows\\System32\\cmd.exe - call  echo __NCMCP_cap0_abababababababababababababababab___E:%errorlevel% - call  echo __NCMCP_cap1_abababababababababababababababab___E:%errorlevel%\u001b\\"
+    },
+    {
+      "type": "pty",
+      "data": "\r\n"
+    },
+    {
+      "type": "pty",
+      "data": "C:\\Users\\agent>"
+    },
+    {
+      "type": "prime",
+      "data": "__NCMCP_cap2_abababababababababababababababab___I\r\n"
+    },
+    {
+      "type": "pty",
+      "data": "\u001b[17;17Hs\u001b[17;18H"
+    },
+    {
+      "type": "pty",
+      "data": "\u001b[17;18Het \"__NCMCP_cap2_abababababababababababababababab__=0\" & (echo __NCMCP_cap2_abababababababababababababababab___S & set \"PAGER=cat\" & set \"SYSTEMD_PAGER=\" & set \"GIT_PAGER=cat\" & set \"LESS=\" & cmd /d /s /c echo three-ok & call echo __NCMCP_cap2_abababababababababababababababab___E:^%errorlevel^%)\u001b[20;14H"
+    },
+    {
+      "type": "pty",
+      "data": "\u001b[20;14H\r\n"
+    },
+    {
+      "type": "pty",
+      "data": "\u001b]0;Administrator: C:\\Windows\\System32\\cmd.exe - call  echo __NCMCP_cap0_abababababababababababababababab___E:%errorlevel% - call  echo __NCMCP_cap1_abababababababababababababababab___E:%errorlevel% - set  \"__NCMCP_cap2_abababababababababababababababab__=0\" \u001b\\"
+    },
+    {
+      "type": "pty",
+      "data": "\u001b]0;Administrator: C:\\Windows\\System32\\cmd.exe - call  echo __NCMCP_cap0_abababababababababababababababab___E:%errorlevel% - call  echo __NCMCP_cap1_abababababababababababababababab___E:%errorlevel%\u001b\\"
+    },
+    {
+      "type": "pty",
+      "data": "\u001b]0;Administrator: C:\\Windows\\System32\\cmd.exe - call  echo __NCMCP_cap0_abababababababababababababababab___E:%errorlevel% - call  echo __NCMCP_cap1_abababababababababababababababab___E:%errorlevel% - echo  __NCMCP_cap2_abababababababababababababababab___S \u001b\\"
+    },
+    {
+      "type": "pty",
+      "data": "__NCMCP_cap2_abababababababababababababababab___S \r\n"
+    },
+    {
+      "type": "pty",
+      "data": "\u001b]0;Administrator: C:\\Windows\\System32\\cmd.exe - call  echo __NCMCP_cap0_abababababababababababababababab___E:%errorlevel% - call  echo __NCMCP_cap1_abababababababababababababababab___E:%errorlevel%\u001b\\"
+    },
+    {
+      "type": "pty",
+      "data": "\u001b]0;Administrator: C:\\Windows\\System32\\cmd.exe - call  echo __NCMCP_cap0_abababababababababababababababab___E:%errorlevel% - call  echo __NCMCP_cap1_abababababababababababababababab___E:%errorlevel% - set  \"PAGER=cat\" \u001b\\"
+    },
+    {
+      "type": "pty",
+      "data": "\u001b]0;Administrator: C:\\Windows\\System32\\cmd.exe - call  echo __NCMCP_cap0_abababababababababababababababab___E:%errorlevel% - call  echo __NCMCP_cap1_abababababababababababababababab___E:%errorlevel%\u001b\\"
+    },
+    {
+      "type": "pty",
+      "data": "\u001b]0;Administrator: C:\\Windows\\System32\\cmd.exe - call  echo __NCMCP_cap0_abababababababababababababababab___E:%errorlevel% - call  echo __NCMCP_cap1_abababababababababababababababab___E:%errorlevel% - set  \"SYSTEMD_PAGER=\" \u001b\\"
+    },
+    {
+      "type": "pty",
+      "data": "\u001b]0;Administrator: C:\\Windows\\System32\\cmd.exe - call  echo __NCMCP_cap0_abababababababababababababababab___E:%errorlevel% - call  echo __NCMCP_cap1_abababababababababababababababab___E:%errorlevel%\u001b\\"
+    },
+    {
+      "type": "pty",
+      "data": "\u001b]0;Administrator: C:\\Windows\\System32\\cmd.exe - call  echo __NCMCP_cap0_abababababababababababababababab___E:%errorlevel% - call  echo __NCMCP_cap1_abababababababababababababababab___E:%errorlevel% - set  \"GIT_PAGER=cat\" \u001b\\"
+    },
+    {
+      "type": "pty",
+      "data": "\u001b]0;Administrator: C:\\Windows\\System32\\cmd.exe - call  echo __NCMCP_cap0_abababababababababababababababab___E:%errorlevel% - call  echo __NCMCP_cap1_abababababababababababababababab___E:%errorlevel%\u001b\\"
+    },
+    {
+      "type": "pty",
+      "data": "\u001b]0;Administrator: C:\\Windows\\System32\\cmd.exe - call  echo __NCMCP_cap0_abababababababababababababababab___E:%errorlevel% - call  echo __NCMCP_cap1_abababababababababababababababab___E:%errorlevel% - set  \"LESS=\" \u001b\\"
+    },
+    {
+      "type": "pty",
+      "data": "\u001b]0;Administrator: C:\\Windows\\System32\\cmd.exe - call  echo __NCMCP_cap0_abababababababababababababababab___E:%errorlevel% - call  echo __NCMCP_cap1_abababababababababababababababab___E:%errorlevel%\u001b\\"
+    },
+    {
+      "type": "pty",
+      "data": "\u001b]0;Administrator: C:\\Windows\\System32\\cmd.exe - call  echo __NCMCP_cap0_abababababababababababababababab___E:%errorlevel% - call  echo __NCMCP_cap1_abababababababababababababababab___E:%errorlevel% - cmd  /d /s /c echo three-ok \u001b\\"
+    },
+    {
+      "type": "pty",
+      "data": "\u001b[?7l\u001b[?7h"
+    },
+    {
+      "type": "pty",
+      "data": "three-ok \r\n"
+    },
+    {
+      "type": "pty",
+      "data": "\u001b]0;Administrator: C:\\Windows\\System32\\cmd.exe - call  echo __NCMCP_cap0_abababababababababababababababab___E:%errorlevel% - call  echo __NCMCP_cap1_abababababababababababababababab___E:%errorlevel%\u001b\\"
+    },
+    {
+      "type": "pty",
+      "data": "\u001b]0;Administrator: C:\\Windows\\System32\\cmd.exe - call  echo __NCMCP_cap0_abababababababababababababababab___E:%errorlevel% - call  echo __NCMCP_cap1_abababababababababababababababab___E:%errorlevel% - call  echo __NCMCP_cap2_abababababababababababababababab___E:%errorlevel%\u001b\\"
+    },
+    {
+      "type": "pty",
+      "data": "\u001b]0;Administrator: C:\\Windows\\System32\\cmd.exe - call  echo __NCMCP_cap0_abababababababababababababababab___E:%errorlevel% - call  echo __NCMCP_cap1_abababababababababababababababab___E:%errorlevel% - echo  __NCMCP_cap2_abababababababababababababababab___E:0\u001b\\"
+    },
+    {
+      "type": "pty",
+      "data": "__NCMCP_cap2_abababababababababababababababab___E:0\r\n\u001b]0;Administrator: C:\\Windows\\System32\\cmd.exe - call  echo __NCMCP_cap0_abababababababababababababababab___E:%errorlevel% - call  echo __NCMCP_cap1_abababababababababababababababab___E:%errorlevel% - call  echo __NCMCP_cap2_abababababababababababababababab___E:%errorlevel\u001b\\"
+    },
+    {
+      "type": "pty",
+      "data": "\r\n"
+    },
+    {
+      "type": "pty",
+      "data": "C:\\Users\\agent>"
+    }
+  ]
+}

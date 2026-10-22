@@ -20,6 +20,8 @@ const {
 const {
   mergeTerminalDataMeta,
 } = require("./preload/terminalDataMeta.cjs");
+const { createMcpOscFilter } = require("./preload/mcpOscFilter.cjs");
+const { createMcpHistoryNavigation } = require("./preload/mcpHistoryNavigation.cjs");
 
 const dataListeners = new Map();
 const displayDataListeners = new Map();
@@ -99,11 +101,55 @@ const _mcpProbePrompts = new Map(); // sessionId -> input/probe marker awaiting 
 const _mcpAbortedProbes = new Map(); // sessionId -> bounded set of cancelled probe markers
 const _mcpProbeReleaseTimers = new Map(); // sessionId -> suppression safety timer
 const _mcpSwallowLeadingLf = new Set(); // a marker row's CR ended the previous chunk
+const _mcpOscFilter = createMcpOscFilter();
+const _mcpConptySessions = new Set(); // trusted local Windows prime metadata
+const CONPTY_MCP_CURSOR_SYNC = "\u001b]633;NetcattyMcpCursorSync\u0007";
+const CONPTY_MCP_COMMAND_START = "\u001b]633;NetcattyMcpCommandStart\u0007";
+const _mcpOscMetas = new Map(); // metadata for an incomplete OSC title/introducer
 const MAX_MCP_BUFFERED_LINE_CHARS = 64 * 1024;
 // A wrapper echo can be repainted without line breaks, so the real start
 // marker may never match line-start checks. Never let a missed release hide
 // the terminal forever.
 const MAX_MCP_PROBE_SUPPRESSION_MS = 5000;
+
+const _mcpHistoryNavigation = createMcpHistoryNavigation({
+  sendInput(sessionId, data) {
+    ipcRenderer.send("netcatty:write", { sessionId, data, automated: false });
+  },
+  resetIdleOutput: resetIdleMcpInputState,
+  deliverOutput(sessionId, data, meta) {
+    deliverTerminalData(sessionId, data, { meta, skipHistoryNavigation: true });
+  },
+  retainMetadata(sessionId, meta) {
+    _mcpPendingMetas.set(sessionId, mergeTerminalDataMeta(_mcpPendingMetas.get(sessionId), meta));
+  },
+});
+
+function resetIdleMcpInputState(sessionId) {
+  if (!_mcpConptySessions.has(sessionId) || _mcpProbePrompts.has(sessionId)
+    || _mcpHistoryNavigation.isAgentRunning(sessionId)) return;
+  const held = _mcpLineBufs.get(sessionId);
+  if (!_mcpDroppingWrappedLine.has(sessionId) && !held?.includes("__NCMCP_")
+    && !(held && _endsWithMarkerPrefix(stripAnsiForProbeFragment(held)))) {
+    flushMcpBufferedOutput(sessionId);
+    return;
+  }
+  // A recalled hidden entry has no newline. Only a new idle-shell input action
+  // ends that repaint; a timer must NOT release active fragmented wrapper echoes.
+  const timer = _mcpFlushTimers.get(sessionId);
+  if (timer) clearTimeout(timer);
+  _mcpFlushTimers.delete(sessionId);
+  _mcpDroppingWrappedLine.delete(sessionId);
+  let meta = mergeTerminalDataMeta(_mcpPendingMetas.get(sessionId), _mcpLineMetas.get(sessionId));
+  _mcpLineBufs.delete(sessionId);
+  _mcpLineMetas.delete(sessionId);
+  _mcpPendingMetas.delete(sessionId);
+  if (hasPluginPipelineIngress(meta)) {
+    _deliverToListeners(sessionId, "", meta);
+    meta = { ...meta, pluginPipelineIngressBytes: 0 };
+  }
+  if (meta) _mcpPendingMetas.set(sessionId, meta);
+}
 
 function clearProbeReleaseTimer(sessionId) {
   const timer = _mcpProbeReleaseTimers.get(sessionId);
@@ -136,20 +182,46 @@ function stripAnsiForProbeFragment(value) {
     .replace(/\u001B\[[0-?]*[ -/]*[@-~]/g, "");
 }
 
+/**
+ * Drop internal text rows, preserving output/prompt rows separated by bare CRs.
+ * OSC payloads are routed separately and never participate in these checks.
+ */
+function cursorSyncForMcpRow(sessionId, row, terminator = "") {
+  if (!_mcpConptySessions.has(sessionId) || !terminator) return "";
+  const visible = stripAnsiForProbeFragment(row);
+  // Never anchor on quoted/echoed wrapper literals, only executed marker rows
+  // and trusted prime/reset rows with a real row boundary.
+  const marker = visible.match(/__NCMCP_[A-Za-z0-9_]+_(S|[IQR]|E:-?\d+)[ \t]*$/);
+  if (!marker) return "";
+  // Program output must retain native absolute coordinates. Only prompt/input
+  // redraws after the hidden wrapper need a compact-display anchor.
+  return marker[1] === "S" ? CONPTY_MCP_COMMAND_START : CONPTY_MCP_CURSOR_SYNC;
+}
+
+function scrubVisibleMarkerRows(visible, sessionId) {
+  const input = String(visible ?? "");
+  const parts = input.split(/(\r\n|\r|\n)/);
+  let out = "";
+  for (let index = 0; index < parts.length; index += 2) {
+    const row = parts[index];
+    const terminator = parts[index + 1] || "";
+    if (row.includes("__NCMCP_")) {
+      out += cursorSyncForMcpRow(sessionId, row, terminator);
+      continue;
+    }
+    out += row + terminator;
+  }
+  return out;
+}
+
 function isProbeCompletionFragment(fragment, marker) {
-  const visible = stripAnsiForProbeFragment(fragment).trimEnd();
+  const visible = stripAnsiForProbeFragment(fragment);
   if (!visible) return false;
-  const startMarker = `${marker}_S`;
   const escaped = marker.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  // ConPTY can append the marker to the previously painted row without a
-  // newline (cursor positioning instead of CRLF). Treat the marker as a
-  // completion when it ends a row, even if more output follows on later rows
-  // of the same chunk; the echoed wrapper leaves ` &`, quotes or continuations
-  // after its marker occurrences.
-  if (new RegExp(`${escaped}_S(?=[\\r\\n]|$)`).test(visible)) return true;
-  if (new RegExp(`${escaped}_E:\\d+(?=[\\r\\n]|$)`).test(visible)) return true;
-  if (visible.startsWith(startMarker) || visible.endsWith(startMarker)) return true;
-  return visible.startsWith(`${marker}_E`);
+  // ConPTY may paint the marker after a wrapper on the same row. A real
+  // CR/LF ends the marker, but a transport chunk boundary does not: the next
+  // chunk may still contain the echoed wrapper's ` &` or quoted suffix.
+  return new RegExp(`${escaped}_(?:S|E:-?\\d+)[ \t]*(?=[\\r\\n])`).test(visible);
 }
 
 function clearMcpSessionState(sessionId) {
@@ -165,6 +237,10 @@ function clearMcpSessionState(sessionId) {
   _mcpProbePrompts.delete(sessionId);
   _mcpAbortedProbes.delete(sessionId);
   _mcpSwallowLeadingLf.delete(sessionId);
+  _mcpOscFilter.clear(sessionId);
+  _mcpOscMetas.delete(sessionId);
+  _mcpConptySessions.delete(sessionId);
+  _mcpHistoryNavigation.clearSession(sessionId);
 }
 
 function filterProbePromptFragment(sessionId, fragment) {
@@ -214,7 +290,78 @@ function _endsWithMarkerPrefix(s) {
   return false;
 }
 
-function filterMcpChunk(sessionId, chunk, meta) {
+function filterMcpChunk(sessionId, chunk, meta, skipHistoryNavigation = false) {
+  if (meta?.mcpConptyCursorSync === true) _mcpConptySessions.add(sessionId);
+  if (!skipHistoryNavigation) {
+    const navigation = _mcpHistoryNavigation.filterOutput(sessionId, chunk, meta);
+    if (navigation) return navigation;
+  }
+  // Prime/reset events are renderer-only control messages, not PTY bytes. They
+  // must still update suppression if the PTY is in the middle of a split OSC.
+  if (/^\r?__NCMCP_[A-Za-z0-9_]+_[IQR]\r?\n?$/.test(chunk)) {
+    return filterMcpTextChunk(sessionId, chunk, meta);
+  }
+
+  const oscMeta = _mcpOscMetas.get(sessionId);
+  const wasBuffered = _mcpOscFilter.hasBuffered(sessionId);
+  const parts = _mcpOscFilter.split(sessionId, chunk);
+  if (!wasBuffered && parts.length === 1 && parts[0].kind === "text" && parts[0].data === chunk) {
+    return filterMcpTextChunk(sessionId, chunk, meta);
+  }
+
+  const heldMeta = _mcpLineMetas.get(sessionId);
+  const pendingMeta = _mcpPendingMetas.get(sessionId);
+  const priorMeta = mergeTerminalDataMeta(mergeTerminalDataMeta(pendingMeta, heldMeta), oscMeta);
+  const stateMeta = mergeTerminalDataMeta(priorMeta, meta);
+  const hadIngress = hasPluginPipelineIngressMarker(heldMeta)
+    || hasPluginPipelineIngressMarker(pendingMeta)
+    || hasPluginPipelineIngressMarker(oscMeta)
+    || hasPluginPipelineIngressMarker(meta);
+  let result = "";
+  for (const part of parts) {
+    if (part.kind === "osc") {
+      // A safe suffix (e.g. a hyperlink label ending in `_`) may be held
+      // while checking for a split marker. It must precede the OSC bytes,
+      // otherwise the title/link boundary overtakes its visible text.
+      // Confirmed internal rows and active wrapper suppression stay held.
+      const bufferedText = _mcpLineBufs.get(sessionId);
+      if (bufferedText && !bufferedText.includes("__NCMCP_")
+        && !_mcpProbePrompts.has(sessionId) && !_mcpDroppingWrappedLine.has(sessionId)) {
+        result += bufferedText;
+        _mcpLineBufs.delete(sessionId);
+        _mcpLineMetas.delete(sessionId);
+      }
+      result += part.data;
+    } else {
+      // Metadata is applied once below, to the original ingress chunk, not to
+      // each text/control fragment or to previously acknowledged OSC bytes.
+      result += filterMcpTextChunk(sessionId, part.data)?.data || "";
+    }
+  }
+
+  let deliveryMeta = result === chunk && !wasBuffered
+    ? mergeTerminalDataMeta(priorMeta, meta, { preserveTerminalPerf: true })
+    : stateMeta;
+  if (hadIngress) {
+    deliveryMeta = {
+      ...(deliveryMeta || {}),
+      pluginPipelineIngressBytes: Number.isFinite(meta?.pluginPipelineIngressBytes)
+        ? Math.max(0, Number(meta.pluginPipelineIngressBytes))
+        : chunk.length,
+    };
+  }
+  if (_mcpLineBufs.has(sessionId) && deliveryMeta) {
+    _mcpLineMetas.set(sessionId, mergeTerminalDataMeta(_mcpLineMetas.get(sessionId), deliveryMeta));
+  }
+  if (_mcpOscFilter.hasBuffered(sessionId)) {
+    if (deliveryMeta) _mcpOscMetas.set(sessionId, deliveryMeta);
+  } else {
+    _mcpOscMetas.delete(sessionId);
+  }
+  return { data: result, meta: deliveryMeta };
+}
+
+function filterMcpTextChunk(sessionId, chunk, meta) {
   // Cancel any pending delayed flush — new data arrived
   const pendingTimer = _mcpFlushTimers.get(sessionId);
   if (pendingTimer) {
@@ -276,24 +423,19 @@ function filterMcpChunk(sessionId, chunk, meta) {
       const released = activeMarker && !_mcpProbePrompts.has(sessionId);
       if (released) {
         // The real start marker ended this row, so the suppression is over.
-        // Deliver anything that shared the row after it (ConPTY can redraw
-        // with cursor moves instead of a CRLF, putting output on the same
-        // logical line as the echoed wrapper).
+        // Remove only the marker row and keep output/prompt rows that share
+        // this chunk (ConPTY can redraw with cursor moves instead of a CRLF).
         _mcpDroppingWrappedLine.delete(sessionId);
-        const startMarker = `${activeMarker}_S`;
         const visible = stripAnsiForProbeFragment(tail);
-        if (visible.endsWith("\r")) _mcpSwallowLeadingLf.add(sessionId);
-        const startIdx = visible.lastIndexOf(startMarker);
-        if (startIdx !== -1) {
-          const after = visible.slice(startIdx + startMarker.length);
-          // Skip the rest of the marker row (including CRLF) and deliver only
-          // output that follows it.
-          const remainder = after.replace(/^[^\r\n]*(?:\r\n|\r|\n)?/, "");
-          if (remainder) result += remainder;
+        const scrubbed = scrubVisibleMarkerRows(tail, sessionId);
+        if (scrubbed) result += scrubbed;
+        if (visible.endsWith("\r") && !scrubVisibleMarkerRows(tail)) {
+          // The marker row's CR ended the chunk; swallow its orphaned LF.
+          _mcpSwallowLeadingLf.add(sessionId);
         }
         break;
       }
-      if (probePrompt || droppedAny || tail.includes("__NCMCP_") || _endsWithMarkerPrefix(tail)) {
+      if (probePrompt || droppedAny) {
         let tailMeta = !held && tail === effectiveChunk ? sameChunkMeta : stateMeta;
         if (heldIngressAlreadyAcknowledged && !hasPluginPipelineIngress(tailMeta)) {
           tailMeta = { ...(tailMeta || {}), pluginPipelineIngressBytes: 0 };
@@ -315,6 +457,34 @@ function filterMcpChunk(sessionId, chunk, meta) {
         if (probePrompt || droppedAny || tail.includes("__NCMCP_")) {
           _mcpDroppingWrappedLine.add(sessionId);
         }
+      } else if (tail.includes("__NCMCP_") || _endsWithMarkerPrefix(tail)) {
+        // Not suppressed: drop complete marker rows only and show output/prompt
+        // rows that share the chunk after them. A trailing partial row must
+        // still be buffered until its marker/completion is known.
+        const lastBreak = Math.max(tail.lastIndexOf("\r"), tail.lastIndexOf("\n"));
+        const complete = lastBreak === -1 ? "" : tail.slice(0, lastBreak + 1);
+        const partial = lastBreak === -1 ? tail : tail.slice(lastBreak + 1);
+        if (complete) {
+          const scrubbed = scrubVisibleMarkerRows(complete, sessionId);
+          if (scrubbed) result += scrubbed;
+        }
+        if (partial) {
+          const partialHasMarker = partial.includes("__NCMCP_");
+          const partialLooksLikePrefix = !partialHasMarker && _endsWithMarkerPrefix(partial);
+          if (partialHasMarker || partialLooksLikePrefix) {
+            let tailMeta = !held && tail === effectiveChunk ? sameChunkMeta : stateMeta;
+            if (heldIngressAlreadyAcknowledged && !hasPluginPipelineIngress(tailMeta)) {
+              tailMeta = { ...(tailMeta || {}), pluginPipelineIngressBytes: 0 };
+            }
+            _mcpLineBufs.set(sessionId, partial);
+            if (tailMeta) _mcpLineMetas.set(sessionId, tailMeta);
+            // A real marker row is internal; a mere marker-prefix suffix may be
+            // ordinary text and must still be released by the timed flush.
+            if (partialHasMarker) _mcpDroppingWrappedLine.add(sessionId);
+          } else {
+            result += partial;
+          }
+        }
       } else {
         result += tail; // safe to display immediately
       }
@@ -327,17 +497,15 @@ function filterMcpChunk(sessionId, chunk, meta) {
     if (released) {
       _mcpDroppingWrappedLine.delete(sessionId);
       droppedAny = false;
-      const startMarker = `${activeMarker}_S`;
-      const visible = stripAnsiForProbeFragment(line);
-      const startIdx = visible.lastIndexOf(startMarker);
-      if (startIdx !== -1) {
-        const after = visible.slice(startIdx + startMarker.length);
-        const remainder = after.replace(/^[^\r\n]*(?:\r\n|\r|\n)?/, "");
-        if (remainder) result += remainder;
-      }
-    } else if (probePrompt || droppedAny || line.includes("__NCMCP_")) {
+      // Drop only the marker row; output/prompt rows sharing this \n line
+      // (separated by bare CRs) must stay visible.
+      result += scrubVisibleMarkerRows(line, sessionId);
+    } else if (probePrompt || droppedAny) {
+      result += cursorSyncForMcpRow(sessionId, line.replace(/\r?\n$/, ""), "\n");
       droppedAny = false;
       _mcpDroppingWrappedLine.delete(sessionId);
+    } else if (line.includes("__NCMCP_")) {
+      result += scrubVisibleMarkerRows(line, sessionId);
     } else {
       result += line;
     }
@@ -359,11 +527,14 @@ function filterMcpChunk(sessionId, chunk, meta) {
 }
 
 function consumeBufferedMcpIngress(sessionId) {
-  const heldMeta = _mcpLineMetas.get(sessionId);
-  if (!hasPluginPipelineIngress(heldMeta)) return;
-  // Retain an explicit zero so a later safe flush does not fall back to the
-  // visible chunk length and acknowledge the already-credited prefix twice.
-  _mcpLineMetas.set(sessionId, { ...heldMeta, pluginPipelineIngressBytes: 0 });
+  // Retain explicit zero credit on both text and OSC buffers. Later completion
+  // or a timed text flush must not acknowledge an already-credited prefix twice.
+  for (const metas of [_mcpLineMetas, _mcpOscMetas]) {
+    const heldMeta = metas.get(sessionId);
+    if (hasPluginPipelineIngress(heldMeta)) {
+      metas.set(sessionId, { ...heldMeta, pluginPipelineIngressBytes: 0 });
+    }
+  }
 }
 
 /**
@@ -427,7 +598,7 @@ function deliverTerminalData(sessionId, data, options = {}) {
     _deliverToListeners(sessionId, data, options.meta);
     return;
   }
-  const filtered = filterMcpChunk(sessionId, data, options.meta);
+  const filtered = filterMcpChunk(sessionId, data, options.meta, options.skipHistoryNavigation);
   if (filtered?.data) {
     _deliverToListeners(sessionId, filtered.data, filtered.meta);
     if (hasPluginPipelineIngress(filtered.meta)) consumeBufferedMcpIngress(sessionId);
@@ -469,6 +640,7 @@ const terminalOutputPorts = createTerminalOutputPortRegistry({
   },
   closedTerminalDataSessions,
   onDrain(sessionId, requestId) {
+    _mcpHistoryNavigation.flush(sessionId);
     flushMcpBufferedOutput(sessionId);
     for (const listener of terminalOutputDrainListeners.get(sessionId) || []) {
       try { listener({ sessionId, requestId }); } catch (err) { console.error("Terminal drain callback failed", err); }
@@ -957,6 +1129,7 @@ const api = createPreloadApi({
   terminalDataBacklog,
   terminalOutputPorts,
   clearTerminalOutputSessionState: clearMcpSessionState,
+  onTerminalInput: (sessionId, data, options) => _mcpHistoryNavigation.onInput(sessionId, data, options),
   terminalOutputDrainListeners,
   terminalUrgentInputPorts,
   languageChangeListeners,

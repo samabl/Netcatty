@@ -229,12 +229,19 @@ function resolveEffectiveShellKind(shellKind, expectedPrompt, options = {}) {
 // Discard unfinished prompt-line input before the agent wrapper so typed-but-
 // not-entered text is not concatenated onto the injected command (#2962).
 // Raw/serial devices have no portable line-kill binding; leave them alone.
-function buildPendingInputClearPrefix(shellKind) {
+function buildPendingInputClearPrefix(shellKind, { windowsConpty = false } = {}) {
   switch (shellKind) {
     case "raw":
       return "";
     case "cmd":
-      return "\x1b";
+      // ConPTY distinguishes an Escape key from a literal ESC character. Bare
+      // ESC does not abandon CMD's pending line in Win32 input mode, so the
+      // stale text can execute before our start marker. Send the same native
+      // key-down/key-up records as xterm (VK;SC;UC;KD;CS;RC), but only on local
+      // ConPTY transports: SSH CMD sessions still need the legacy byte.
+      return windowsConpty
+        ? "\x1b[27;1;27;1;0;1_\x1b[27;1;27;0;0;1_"
+        : "\x1b";
     case "powershell":
       // Ctrl+C ("abandon the current line") is the only PowerShell binding that
       // holds in every PSReadLine edit mode. The previous Escape/vi hybrid
@@ -307,20 +314,14 @@ function powerShellNewlineSnippet(separator) {
  * text is the unchanged single-line wrapper, executed once by
  * Invoke-Expression, so the `_S`/`_E:<rc>` protocol is untouched.
  */
-function buildPowerShellWrapperLines(wrapperText, marker) {
-  const tag = (/^__NCMCP_([A-Za-z0-9]+)_/.exec(String(marker || "")) || [])[1] || "job";
-  // Job-scoped accumulator: unique per job, and its name keeps `__NCMCP_` in
-  // every typed line for the echo filter.
-  const acc = `$__NCMCP_${tag}`;
+function appendPowerShellTextStatements(statements, acc, text) {
   const statementBudget = Math.max(
     8,
     PS_WRAPPER_MAX_LINE_CHARS - `${acc}+=''`.length,
   );
-  // Initialise first: `+=` on an unset variable is an error under
-  // Set-StrictMode, and profiles do set it.
-  const statements = [`${acc}=''`];
-  // Odd indices of a split with a capturing group are the separators.
-  const parts = String(wrapperText ?? "").split(/(\r\n|\n|\r)/);
+  // Initialise first: += on an unset variable fails under StrictMode.
+  statements.push(`${acc}=''`);
+  const parts = String(text ?? "").split(/(\r\n|\n|\r)/);
   for (let index = 0; index < parts.length; index += 1) {
     if (index % 2 === 1) {
       statements.push(`${acc}+=${powerShellNewlineSnippet(parts[index])}`);
@@ -330,9 +331,43 @@ function buildPowerShellWrapperLines(wrapperText, marker) {
       statements.push(`${acc}+='${escapePowerShellSingleQuoted(chunk)}'`);
     }
   }
+}
+
+/**
+ * Install a session-only PSReadLine guard before typing the job statements.
+ * The first bootstrap can itself enter history; subsequent jobs cannot. Keep
+ * the previous delegate in an immutable closure and return its exact result:
+ * PSReadLine 2.4 can return MemoryOnly, which must NOT become boolean true.
+ * Compare the actual installed delegate, not its string representation, so a
+ * user replacing their handler is respected and repeated jobs do not stack
+ * guards. Missing PSReadLine must not prevent agent execution.
+ */
+function powerShellHistoryGuardStatements() {
+  const script =
+    "&{try{$o=Get-PSReadLineOption -ea Stop;$p=$o.AddToHistoryHandler;" +
+    "$g=Get-Variable __NCMCP_historyGuard -Scope Global -ValueOnly -ea Ignore;" +
+    "if(!$g -or ![object]::ReferenceEquals($p,$g)){" +
+    "$h={param($l)if($l.Contains('__NCMCP_')){$false}" +
+    "elseif($p){$p.Invoke($l)}else{$true}}.GetNewClosure();" +
+    "Set-PSReadLineOption -AddToHistoryHandler $h -ea Stop;" +
+    "$global:__NCMCP_historyGuard=(Get-PSReadLineOption).AddToHistoryHandler" +
+    "}}catch{}}";
+  const acc = "$__NCMCP_h";
+  const statements = [];
+  appendPowerShellTextStatements(statements, acc, script);
   statements.push(`Invoke-Expression ${acc}`);
-  // CR only: a LF after Enter leaves PSReadLine in a continuation state, which
-  // renders a ">> " row for every statement.
+  return statements;
+}
+
+function buildPowerShellWrapperLines(wrapperText, marker) {
+  const tag = (/^__NCMCP_([A-Za-z0-9]+)_/.exec(String(marker || "")) || [])[1] || "job";
+  // The fixed guard accumulator and job-scoped accumulator both carry the
+  // reserved marker on every short, complete physical input line.
+  const acc = `$__NCMCP_${tag}`;
+  const statements = powerShellHistoryGuardStatements();
+  appendPowerShellTextStatements(statements, acc, wrapperText);
+  statements.push(`Invoke-Expression ${acc}`);
+  // CR only: LF after Enter puts PSReadLine into a continuation state.
   return `${statements.join("\r")}\r`;
 }
 
@@ -688,6 +723,7 @@ module.exports = {
   pendingInputClearSettleMs,
   POWERSHELL_CLEAR_SETTLE_MS,
   PS_WRAPPER_MAX_LINE_CHARS,
+  powerShellHistoryGuardStatements,
   buildPowerShellWrapperLines,
   buildWrappedCommand,
   buildBashHistoryCleanup,

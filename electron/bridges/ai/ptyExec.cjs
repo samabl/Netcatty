@@ -66,6 +66,7 @@ function startPtyJob(ptyStream, command, options) {
     abortSignal,
     expectedPrompt,
     typedInput = false,
+    windowsConpty = false,
     echoCommand,
     onEchoSuppressionPrime,
     maxBufferedChars = 0,
@@ -773,11 +774,26 @@ function startPtyJob(ptyStream, command, options) {
     cleanupFns.push(() => abortSignal.removeEventListener("abort", onAbort));
   }
 
-  if (typedInput && typeof echoCommand === "function") {
-    try {
-      echoCommand(command);
-    } catch {
-      // Ignore synthetic echo failures.
+  let inputDisplayStarted = false;
+  function startInputDisplay() {
+    if (inputDisplayStarted) return;
+    inputDisplayStarted = true;
+    if (typedInput && typeof echoCommand === "function") {
+      try {
+        echoCommand(command);
+      } catch {
+        // Ignore synthetic echo failures.
+      }
+    }
+    // Prime before any wrapper/probe text, but after a Windows line editor
+    // has repainted the cleared prompt. Suppressing that repaint leaves the
+    // old unsubmitted input visually joined to the synthetic command echo.
+    if (typeof onEchoSuppressionPrime === "function") {
+      try {
+        onEchoSuppressionPrime(marker);
+      } catch {
+        // Display suppression must never prevent the command from starting.
+      }
     }
   }
 
@@ -887,9 +903,17 @@ function startPtyJob(ptyStream, command, options) {
    * keep the single write.
    */
   function writeInputWithClear(text) {
-    const prefix = buildPendingInputClearPrefix(resolvedShellKind);
-    const settleMs = pendingInputClearSettleMs(resolvedShellKind);
+    const prefix = buildPendingInputClearPrefix(resolvedShellKind, { windowsConpty });
+    const visibleWindowsClear = typedInput && !inputDisplayStarted
+      && (resolvedShellKind === "cmd" || resolvedShellKind === "powershell");
+    // CMD's Escape also repaints asynchronously. Only the first visible
+    // Windows clear needs this window; non-UI callers and live-shell probes
+    // retain their existing input-delivery behavior.
+    const settleMs = visibleWindowsClear
+      ? Math.max(120, pendingInputClearSettleMs(resolvedShellKind))
+      : pendingInputClearSettleMs(resolvedShellKind);
     if (!prefix || !(settleMs > 0)) {
+      startInputDisplay();
       writeInput(`${prefix}${text}`);
       return;
     }
@@ -900,6 +924,7 @@ function startPtyJob(ptyStream, command, options) {
     clearSettleTimer = setTimeout(() => {
       clearSettleTimer = null;
       if (finished || cancelRequested || generation !== inputWriteGeneration) return;
+      startInputDisplay();
       writeInput(text);
     }, settleMs);
   }
@@ -912,12 +937,8 @@ function startPtyJob(ptyStream, command, options) {
   // _I printf runs. Delivering the _I line over the data channel up front
   // suppresses the whole echo; the _S output releases it, and finish() sends
   // the _R reset (onProbeAborted) when the command never starts.
-  if (typeof onEchoSuppressionPrime === "function") {
-    try {
-      onEchoSuppressionPrime(marker);
-    } catch {
-      // Display suppression must never prevent the command from starting.
-    }
+  if (!typedInput || (resolvedShellKind !== "cmd" && resolvedShellKind !== "powershell")) {
+    startInputDisplay();
   }
   if (probingShell) {
     writeInputWithClear(buildLiveShellProbe(marker));
@@ -958,6 +979,7 @@ function startPtyJob(ptyStream, command, options) {
  * @param {AbortSignal} [options.abortSignal] - AbortSignal to cancel execution
  * @param {string} [options.expectedPrompt] - Last observed idle prompt for exact fallback matching
  * @param {boolean} [options.typedInput=false] - Emit synthetic command echo before execution
+ * @param {boolean} [options.windowsConpty=false] - Use native CMD clear keys on local Windows PTYs
  * @param {(command: string) => void} [options.echoCommand] - Callback used to display synthetic command echo
  */
 function execViaPty(ptyStream, command, options) {

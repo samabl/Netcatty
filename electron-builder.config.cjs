@@ -61,6 +61,8 @@ module.exports = {
         // Keep them out of production ASARs so no example plugin can be
         // mistaken for an installed or host-trusted package.
         '!electron/plugins/fixtures/**/*',
+        // Recorded terminal streams are test-only, never runtime resources.
+        '!electron/preload/fixtures/**/*',
         // Main-process terminal flow control reads shared thresholds from here
         // (terminalFlowAck.cjs). Must ship beside electron/ in app.asar.
         'infrastructure/config/terminalFlowConstants.cjs',

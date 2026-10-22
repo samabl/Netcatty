@@ -1,5 +1,7 @@
 import type { IDisposable, IParser, Terminal as XTerm } from "@xterm/xterm";
 
+import { resetConptyCursorSync } from "./runtime/conptyCursorSync";
+
 type CsiParam = number | number[];
 type EraseInDisplayTerminal = XTerm & {
   parser: Pick<IParser, "registerCsiHandler">;
@@ -133,6 +135,7 @@ export const clearTerminalViewport = (
   term: XTerm,
   options: ClearTerminalViewportOptions = {},
 ): boolean => {
+  resetConptyCursorSync(term);
   const buffer = term.buffer.active;
   if (buffer.type !== "normal") return false;
 

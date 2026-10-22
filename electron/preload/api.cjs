@@ -340,6 +340,7 @@ function createPreloadApi(ctx) {
     return ipcRenderer.invoke("netcatty:local:validatePath", { path, type });
   },
   writeToSession: (sessionId, data, options) => {
+    ctx.onTerminalInput?.(sessionId, data, options);
     const lineDelayMs = Number(options?.lineDelayMs);
     ipcRenderer.send("netcatty:write", {
       sessionId,
@@ -366,6 +367,7 @@ function createPreloadApi(ctx) {
     return () => ipcRenderer.removeListener("netcatty:paste-write", listener);
   },
   interruptSession: (sessionId, trace, options) => {
+    ctx.onTerminalInput?.(sessionId, "\x03");
     const sanitizedTrace = sanitizeInterruptTrace(trace);
     if (options?.cancelPendingWritesOnly === true) {
       ipcRenderer.send("netcatty:interrupt", { sessionId, trace: sanitizedTrace, cancelPendingWritesOnly: true });
