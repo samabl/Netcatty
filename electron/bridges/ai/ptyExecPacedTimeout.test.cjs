@@ -113,10 +113,18 @@ for (const shellKind of ['powershell', 'cmd']) {
     const job = startPtyJob(pty, `echo ${'x'.repeat(12000)}`, {
       shellKind, bastionKeystrokes: true, timeoutMs: 500,
     });
-    assert.equal(writes.length, 128);
+    // PowerShell delivers the pending-input clear as its own keystroke and
+    // waits for it to settle before typing the wrapper.
+    const clearWrites = shellKind === 'powershell' ? 1 : 0;
+    if (clearWrites) {
+      assert.equal(writes.length, 1);
+      assert.equal(writes[0], '\x03');
+      t.mock.timers.tick(120);
+    }
+    assert.equal(writes.length, clearWrites + 128);
     t.mock.timers.tick(30);
-    assert.equal(writes.length, 256);
-    assert.ok(writes.every((value) => Array.from(value).length === 1));
+    assert.equal(writes.length, clearWrites + 256);
+    assert.ok(writes.slice(clearWrites).every((value) => Array.from(value).length === 1));
     job.cancel();
     const count = writes.length;
     t.mock.timers.tick(30);
