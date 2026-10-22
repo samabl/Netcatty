@@ -318,7 +318,7 @@ export function useUpdateCheck(options?: { autoUpdateEnabled?: boolean; enabled?
             tagName: 'v1.0.0',
             name: 'Netcatty v1.0.0',
             body: 'Demo release for testing update notification',
-            htmlUrl: 'https://github.com/binaricat/Netcatty/releases',
+            htmlUrl: 'https://github.com/samabl/Netcatty/releases',
             publishedAt: new Date().toISOString(),
             assets: [],
           },
