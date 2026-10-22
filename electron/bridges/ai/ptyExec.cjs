@@ -446,7 +446,11 @@ function startPtyJob(ptyStream, command, options) {
   function finish(stdout, exitCode, error) {
     if (finished) return;
     finished = true;
-    if (!foundStart && typeof onProbeAborted === "function") {
+    // Always release the renderer's display suppression, including on success.
+    // A successful job never reaches the !foundStart path, and if the renderer
+    // could not recognize the start marker (ConPTY repainted it without a line
+    // break) its latch would otherwise hide every later line and look frozen.
+    if (typeof onProbeAborted === "function") {
       try {
         onProbeAborted(marker);
       } catch {

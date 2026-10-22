@@ -97,19 +97,74 @@ const _mcpFlushTimers = new Map(); // sessionId -> delayed-flush timer
 const _mcpDroppingWrappedLine = new Set(); // sessionIds with a split marker echo line in progress
 const _mcpProbePrompts = new Map(); // sessionId -> input/probe marker awaiting command start
 const _mcpAbortedProbes = new Map(); // sessionId -> bounded set of cancelled probe markers
+const _mcpProbeReleaseTimers = new Map(); // sessionId -> suppression safety timer
+const _mcpSwallowLeadingLf = new Set(); // a marker row's CR ended the previous chunk
 const MAX_MCP_BUFFERED_LINE_CHARS = 64 * 1024;
+// A wrapper echo can be repainted without line breaks, so the real start
+// marker may never match line-start checks. Never let a missed release hide
+// the terminal forever.
+const MAX_MCP_PROBE_SUPPRESSION_MS = 5000;
+
+function clearProbeReleaseTimer(sessionId) {
+  const timer = _mcpProbeReleaseTimers.get(sessionId);
+  if (timer) clearTimeout(timer);
+  _mcpProbeReleaseTimers.delete(sessionId);
+}
+
+function armProbeReleaseTimer(sessionId) {
+  clearProbeReleaseTimer(sessionId);
+  const timer = setTimeout(() => {
+    _mcpProbeReleaseTimers.delete(sessionId);
+    if (!_mcpProbePrompts.has(sessionId)) return;
+    _mcpProbePrompts.delete(sessionId);
+    // Stop dropping the wrapper echo even if its newline never arrived. The
+    // held fragment may be wrapper text, so discard it and resume with the
+    // next real output/prompt instead of freezing the terminal.
+    _mcpDroppingWrappedLine.delete(sessionId);
+    _mcpLineBufs.delete(sessionId);
+    _mcpLineMetas.delete(sessionId);
+    _mcpPendingMetas.delete(sessionId);
+    flushMcpBufferedOutput(sessionId);
+  }, MAX_MCP_PROBE_SUPPRESSION_MS);
+  timer?.unref?.();
+  _mcpProbeReleaseTimers.set(sessionId, timer);
+}
+
+function stripAnsiForProbeFragment(value) {
+  return String(value ?? "")
+    .replace(/\u001B\](?:[^\u0007]*?(?:\u0007|\u001B\\)|[^\u0007]*$)/g, "")
+    .replace(/\u001B\[[0-?]*[ -/]*[@-~]/g, "");
+}
+
+function isProbeCompletionFragment(fragment, marker) {
+  const visible = stripAnsiForProbeFragment(fragment).trimEnd();
+  if (!visible) return false;
+  const startMarker = `${marker}_S`;
+  const escaped = marker.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  // ConPTY can append the marker to the previously painted row without a
+  // newline (cursor positioning instead of CRLF). Treat the marker as a
+  // completion when it ends a row, even if more output follows on later rows
+  // of the same chunk; the echoed wrapper leaves ` &`, quotes or continuations
+  // after its marker occurrences.
+  if (new RegExp(`${escaped}_S(?=[\\r\\n]|$)`).test(visible)) return true;
+  if (new RegExp(`${escaped}_E:\\d+(?=[\\r\\n]|$)`).test(visible)) return true;
+  if (visible.startsWith(startMarker) || visible.endsWith(startMarker)) return true;
+  return visible.startsWith(`${marker}_E`);
+}
 
 function clearMcpSessionState(sessionId) {
   if (!sessionId) return;
   const pendingTimer = _mcpFlushTimers.get(sessionId);
   if (pendingTimer) clearTimeout(pendingTimer);
   _mcpFlushTimers.delete(sessionId);
+  clearProbeReleaseTimer(sessionId);
   _mcpLineBufs.delete(sessionId);
   _mcpLineMetas.delete(sessionId);
   _mcpPendingMetas.delete(sessionId);
   _mcpDroppingWrappedLine.delete(sessionId);
   _mcpProbePrompts.delete(sessionId);
   _mcpAbortedProbes.delete(sessionId);
+  _mcpSwallowLeadingLf.delete(sessionId);
 }
 
 function filterProbePromptFragment(sessionId, fragment) {
@@ -119,7 +174,10 @@ function filterProbePromptFragment(sessionId, fragment) {
     aborted.add(reset[1]);
     if (aborted.size > 32) aborted.delete(aborted.values().next().value);
     _mcpAbortedProbes.set(sessionId, aborted);
-    if (_mcpProbePrompts.get(sessionId) === reset[1]) _mcpProbePrompts.delete(sessionId);
+    if (_mcpProbePrompts.get(sessionId) === reset[1]) {
+      _mcpProbePrompts.delete(sessionId);
+      clearProbeReleaseTimer(sessionId);
+    }
     return true;
   }
   // I starts suppression before multiline input; Q keeps it active after
@@ -127,12 +185,13 @@ function filterProbePromptFragment(sessionId, fragment) {
   const completion = fragment.match(/^\r?(__NCMCP_[A-Za-z0-9_]+)_[IQ]/);
   if (completion && !_mcpAbortedProbes.get(sessionId)?.has(completion[1])) {
     _mcpProbePrompts.set(sessionId, completion[1]);
+    armProbeReleaseTimer(sessionId);
   }
   const marker = _mcpProbePrompts.get(sessionId);
   if (!marker) return false;
-  const line = fragment.replace(/^\r/, "");
-  if (line.startsWith(`${marker}_S`) || line.startsWith(`${marker}_E`)) {
+  if (isProbeCompletionFragment(fragment, marker)) {
     _mcpProbePrompts.delete(sessionId);
+    clearProbeReleaseTimer(sessionId);
   }
   return true;
 }
@@ -172,7 +231,13 @@ function filterMcpChunk(sessionId, chunk, meta) {
   const sameChunkMeta = mergeTerminalDataMeta(mergeTerminalDataMeta(pendingMeta, heldMeta), meta, {
     preserveTerminalPerf: true,
   });
-  const data = held + chunk;
+  let effectiveChunk = chunk;
+  if (_mcpSwallowLeadingLf.has(sessionId)) {
+    _mcpSwallowLeadingLf.delete(sessionId);
+    // The marker row ended with CR in the previous chunk; its LF arrives here.
+    if (effectiveChunk.startsWith("\n")) effectiveChunk = effectiveChunk.slice(1);
+  }
+  const data = held + effectiveChunk;
   _mcpLineBufs.delete(sessionId);
   _mcpLineMetas.delete(sessionId);
   _mcpPendingMetas.delete(sessionId);
@@ -187,7 +252,7 @@ function filterMcpChunk(sessionId, chunk, meta) {
             ...(deliveryMeta || {}),
             pluginPipelineIngressBytes: Number.isFinite(meta?.pluginPipelineIngressBytes)
               ? Math.max(0, Number(meta.pluginPipelineIngressBytes))
-              : chunk.length,
+              : effectiveChunk.length,
           }
         : deliveryMeta,
     };
@@ -206,9 +271,30 @@ function filterMcpChunk(sessionId, chunk, meta) {
       // echoes can wrap across PTY lines; wrapped fragments that don't
       // contain __NCMCP_ would otherwise leak through as garbage.
       const tail = data.slice(pos);
+      const activeMarker = _mcpProbePrompts.get(sessionId);
       const probePrompt = filterProbePromptFragment(sessionId, tail);
+      const released = activeMarker && !_mcpProbePrompts.has(sessionId);
+      if (released) {
+        // The real start marker ended this row, so the suppression is over.
+        // Deliver anything that shared the row after it (ConPTY can redraw
+        // with cursor moves instead of a CRLF, putting output on the same
+        // logical line as the echoed wrapper).
+        _mcpDroppingWrappedLine.delete(sessionId);
+        const startMarker = `${activeMarker}_S`;
+        const visible = stripAnsiForProbeFragment(tail);
+        if (visible.endsWith("\r")) _mcpSwallowLeadingLf.add(sessionId);
+        const startIdx = visible.lastIndexOf(startMarker);
+        if (startIdx !== -1) {
+          const after = visible.slice(startIdx + startMarker.length);
+          // Skip the rest of the marker row (including CRLF) and deliver only
+          // output that follows it.
+          const remainder = after.replace(/^[^\r\n]*(?:\r\n|\r|\n)?/, "");
+          if (remainder) result += remainder;
+        }
+        break;
+      }
       if (probePrompt || droppedAny || tail.includes("__NCMCP_") || _endsWithMarkerPrefix(tail)) {
-        let tailMeta = !held && tail === chunk ? sameChunkMeta : stateMeta;
+        let tailMeta = !held && tail === effectiveChunk ? sameChunkMeta : stateMeta;
         if (heldIngressAlreadyAcknowledged && !hasPluginPipelineIngress(tailMeta)) {
           tailMeta = { ...(tailMeta || {}), pluginPipelineIngressBytes: 0 };
         }
@@ -235,8 +321,21 @@ function filterMcpChunk(sessionId, chunk, meta) {
       break;
     }
     const line = data.slice(pos, nlIdx + 1); // includes the \n
+    const activeMarker = _mcpProbePrompts.get(sessionId);
     const probePrompt = filterProbePromptFragment(sessionId, line);
-    if (probePrompt || droppedAny || line.includes("__NCMCP_")) {
+    const released = activeMarker && !_mcpProbePrompts.has(sessionId);
+    if (released) {
+      _mcpDroppingWrappedLine.delete(sessionId);
+      droppedAny = false;
+      const startMarker = `${activeMarker}_S`;
+      const visible = stripAnsiForProbeFragment(line);
+      const startIdx = visible.lastIndexOf(startMarker);
+      if (startIdx !== -1) {
+        const after = visible.slice(startIdx + startMarker.length);
+        const remainder = after.replace(/^[^\r\n]*(?:\r\n|\r|\n)?/, "");
+        if (remainder) result += remainder;
+      }
+    } else if (probePrompt || droppedAny || line.includes("__NCMCP_")) {
       droppedAny = false;
       _mcpDroppingWrappedLine.delete(sessionId);
     } else {
@@ -245,7 +344,7 @@ function filterMcpChunk(sessionId, chunk, meta) {
     pos = nlIdx + 1;
   }
 
-  const deliveryMeta = !held && result === chunk ? sameChunkMeta : stateMeta;
+  const deliveryMeta = !held && result === effectiveChunk ? sameChunkMeta : stateMeta;
   return {
     data: result,
     meta: heldIngressAlreadyAcknowledged

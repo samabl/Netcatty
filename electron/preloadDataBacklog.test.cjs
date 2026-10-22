@@ -609,6 +609,34 @@ test("oversized unterminated MCP marker output stays bounded and hidden", async 
   }
 });
 
+test("MCP suppression releases when ConPTY appends the start marker without a newline", async () => {
+  const preload = loadPreloadWithFakeElectron();
+  try {
+    const received = [];
+    preload.api.onSessionData("session-1", (chunk) => received.push(chunk));
+    const send = (data) => preload.handlers.get("netcatty:data")?.({}, {
+      sessionId: "session-1",
+      data,
+    });
+    const marker = "__NCMCP_release_abcdef0123456789abcdef0123456789__";
+
+    // onEchoSuppressionPrime arms the display filter before the wrapper is typed.
+    send(`${marker}_I\n`);
+    // The echoed wrapper and the real start marker share one ConPTY row
+    // (cursor movement instead of CRLF), and the command output follows on the
+    // next row of the same chunk. The filter must release and show it.
+    send(`C:\\>set "${marker}=0" & echo ${marker}_S\rinstalled-cmd-ok\r`);
+    send("next-line\r\n");
+    await sleep(120);
+
+    const delivered = received.join("");
+    assert.match(delivered, /installed-cmd-ok/);
+    assert.match(delivered, /next-line/);
+  } finally {
+    preload.cleanup();
+  }
+});
+
 test("terminal output port delivery preserves terminal perf metadata", () => {
   const preload = loadPreloadWithFakeElectron();
   try {
